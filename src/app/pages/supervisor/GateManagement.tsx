@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { ImageWithFallback } from '../../components/figma/ImageWithFallback.tsx';
 import { toast } from 'sonner';
+import { processLicensePlate } from '../../service/lprService.ts';
 
 interface ScannedVehicle {
   plateNumber: string;
@@ -44,47 +45,30 @@ export const GateManagement = () => {
   ];
 
   // Handle image selection from device
-  const handlePlateImageSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePlateImageSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setScanning(true);
-        // Simulate OCR processing
-        setTimeout(() => {
-          // Check for duplicate plate numbers
-          const isDuplicate = Math.random() > 0.7; // 30% chance of duplicate
-          setScannedData({
-            plateNumber: '30A-12345',
-            plateImage: reader.result as string,
-            driverImage: '',
-            possibleOwners: isDuplicate
-              ? [
-                  {
-                    id: '1',
-                    name: 'Nguyễn Văn A',
-                    phone: '0901234567',
-                    lastUsed: new Date('2026-03-28'),
-                  },
-                  {
-                    id: '2',
-                    name: 'Trần Thị B',
-                    phone: '0902345678',
-                    lastUsed: new Date('2026-03-25'),
-                  },
-                ]
-              : undefined,
-          });
-          setScanning(false);
-          toast.success(
-            isDuplicate
-              ? 'Phát hiện 2 Người dùng cùng biển số! Vui lòng chọn Người dùng đúng.'
-              : 'Đã nhận diện biển số thành công!'
-          );
-        }, 2000);
-      };
-      reader.readAsDataURL(file);
-    }
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      const previewImage = reader.result as string;
+      setScanning(true);
+      try {
+        const plateNumber = await processLicensePlate(file);
+        setScannedData({
+          plateNumber,
+          plateImage: previewImage,
+          driverImage: '',
+        });
+        toast.success('Đã nhận diện biển số thành công!');
+      } catch (error) {
+        console.error('Lỗi nhận diện biển số:', error);
+        toast.error('Lỗi khi gọi API nhận diện biển số. Vui lòng thử lại.');
+      } finally {
+        setScanning(false);
+      }
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleDriverImageSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
