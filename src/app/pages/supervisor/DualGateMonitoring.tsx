@@ -6,6 +6,7 @@ import {
   Users, RefreshCw
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { processLicensePlate } from '../../service/lprService';
 
 interface ScannedVehicle {
   plateNumber: string;
@@ -70,19 +71,22 @@ export const DualGateMonitoring = () => {
   ];
 
   // Handle Entry Gate - Plate Image
-  const handleEntryPlateImage = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleEntryPlateImage = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
       const reader = new FileReader();
-      reader.onloadend = () => {
+      reader.onloadend = async () => {
         setEntryGate((prev) => ({ ...prev, scanning: true }));
-        setTimeout(() => {
+        try {
+          // Gọi LPR API để lấy biển số thực tế
+          const plateNumber = await processLicensePlate(file);
           const isDuplicate = Math.random() > 0.7;
+          
           setEntryGate((prev) => ({
             ...prev,
             scanning: false,
             scannedData: {
-              plateNumber: '30A-' + Math.floor(10000 + Math.random() * 90000),
+              plateNumber: plateNumber,
               plateImage: reader.result as string,
               driverImage: '',
               possibleOwners: isDuplicate
@@ -108,7 +112,10 @@ export const DualGateMonitoring = () => {
               ? '⚠️ [Cổng VÀO] Phát hiện trùng biển số!'
               : '✓ [Cổng VÀO] Đã nhận diện biển số!'
           );
-        }, 2000);
+        } catch (error) {
+          setEntryGate((prev) => ({ ...prev, scanning: false }));
+          toast.error(`❌ [Cổng VÀO] Lỗi nhận diện: ${error instanceof Error ? error.message : 'Lỗi không xác định'}`);
+        }
       };
       reader.readAsDataURL(file);
     }
@@ -135,24 +142,30 @@ export const DualGateMonitoring = () => {
   };
 
   // Handle Exit Gate - Plate Image
-  const handleExitPlateImage = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleExitPlateImage = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
       const reader = new FileReader();
-      reader.onloadend = () => {
+      reader.onloadend = async () => {
         setExitGate((prev) => ({ ...prev, scanning: true }));
-        setTimeout(() => {
+        try {
+          // Gọi LPR API để lấy biển số thực tế
+          const plateNumber = await processLicensePlate(file);
+          
           setExitGate((prev) => ({
             ...prev,
             scanning: false,
             scannedData: {
-              plateNumber: '51F-' + Math.floor(10000 + Math.random() * 90000),
+              plateNumber: plateNumber,
               plateImage: reader.result as string,
               driverImage: '',
             },
           }));
           toast.success('✓ [Cổng RA] Đã nhận diện biển số!');
-        }, 2000);
+        } catch (error) {
+          setExitGate((prev) => ({ ...prev, scanning: false }));
+          toast.error(`❌ [Cổng RA] Lỗi nhận diện: ${error instanceof Error ? error.message : 'Lỗi không xác định'}`);
+        }
       };
       reader.readAsDataURL(file);
     }
