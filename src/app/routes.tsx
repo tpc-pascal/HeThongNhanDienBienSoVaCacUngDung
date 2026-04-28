@@ -68,6 +68,7 @@ import { ProtectedRoute } from "./components/ProtectedRoute.tsx";
 import { AuthCallback } from "./pages/AuthCallback.tsx";
 import { ResetUserPin } from "./pages/owner/ResetUserPin.tsx";
 import { AdminPinSecurity } from "./pages/admin/AdminPinSecurity.tsx";
+import { VehicleVerify } from "./pages/provider/VehicleVerify.tsx";
 
 
 const ALL_ROLES = ["owner", "supervisor", "admin", "provider", "support"];
@@ -602,6 +603,15 @@ export const router = createBrowserRouter([
     ),
     errorElement: <ErrorBoundary />,
   },
+  {
+  path: "/provider/vehicle-verify",
+  element: (
+    <Guard allowedRoles={PROVIDER_ROLES}>
+      <VehicleVerify />
+    </Guard>
+  ),
+  errorElement: <ErrorBoundary />,
+},
 
   // Not found / unauthorized
   {

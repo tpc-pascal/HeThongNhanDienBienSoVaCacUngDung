@@ -752,14 +752,41 @@ function LotMediaForm({ lot, onSaved }: { lot: any; onSaved: () => void }) {
 function ZoneManager({ lot, onRefresh }: { lot: any; onRefresh: () => void }) {
   const [savingZoneId, setSavingZoneId] = useState<string | null>(null);
 
- const updateZone = async (zoneId: string, payload: Record<string, any>) => {
+const updateZone = async (zoneId: string, payload: any): Promise<string> => {
   setSavingZoneId(zoneId);
   try {
-    const { error } = await supabase.from('khuvudo').update(payload).eq('makhuvuc', zoneId);
+    // 👉 tạo mới
+    if (zoneId.startsWith('tmp_')) {
+      const { data, error } = await supabase
+        .from('khuvudo')
+        .insert({
+          ...payload,
+          mabaido: lot.mabaido,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      toast.success('Đã tạo khu vực mới');
+
+      return data.makhuvuc; // ✅ trả về ID thật
+    }
+
+    // 👉 update
+    const { error } = await supabase
+      .from('khuvudo')
+      .update(payload)
+      .eq('makhuvuc', zoneId);
+
     if (error) throw error;
+
     toast.success('Đã lưu sân đỗ');
-  } catch (error: any) {
-    toast.error(error?.message ?? 'Lưu khu vực thất bại');
+
+    return zoneId; // ✅ luôn return
+  } catch (err: any) {
+    toast.error(err.message);
+    throw err; // ❗ QUAN TRỌNG: phải throw lại
   } finally {
     setSavingZoneId(null);
   }
@@ -809,7 +836,7 @@ function ZoneEditor({
   lotId,
 }: {
   zone: any;
-  onSave: (id: string, payload: Record<string, any>) => Promise<void> | void;
+onSave: (id: string, payload: Record<string, any>) => Promise<string>;
   onDelete: (zone: any) => void;
   saving: boolean;
   onRefresh: () => void;
@@ -886,11 +913,28 @@ function ZoneEditor({
     if (!imageFile) return null;
     setUploading(true);
     try {
-      const fileName = `${Date.now()}_${imageFile.name}`;
-      const { data, error } = await supabase.storage.from('SanDo').upload(fileName, imageFile);
-      if (error) throw error;
-      const { data: publicUrl } = supabase.storage.from('SanDo').getPublicUrl(data.path);
-      return publicUrl.publicUrl;
+      const safeFileName = imageFile.name
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/[^a-zA-Z0-9._-]/g, '_');
+
+const fileName = `zones/${Date.now()}_${safeFileName}`;
+
+const { data, error } = await supabase.storage
+  .from('SanDo')
+  .upload(fileName, imageFile, {
+    cacheControl: '3600',
+    upsert: false,
+  });
+
+if (error) throw error;
+if (!data?.path) throw new Error('Upload failed: no path returned');
+
+const { data: publicUrl } = supabase.storage
+  .from('SanDo')
+  .getPublicUrl(data.path);
+
+return publicUrl.publicUrl;
     } finally {
       setUploading(false);
     }
@@ -917,23 +961,26 @@ function ZoneEditor({
 
   const updateSpot = (spotId: string, patch: Partial<DraftSpot>) => {
     setDraftSpots((prev) => prev.map((spot) => (spot.id === spotId ? { ...spot, ...patch } : spot)));
-  };
+  }
 
   const removeSpot = (spotId: string) => {
     setDraftSpots((prev) => prev.filter((spot) => spot.id !== spotId));
   };
 
-  const save = async () => {
+const save = async () => {
+  try {
     const imageUrl = imageFile ? await uploadZoneImage() : undefined;
 
-    await onSave(zone.makhuvuc, {
+    const realZoneId = await onSave(zone.makhuvuc, {
       tenkhuvuc: name,
       mota: desc,
       ...(imageUrl ? { hinhkhuvuc: imageUrl } : {}),
     });
 
+    const zoneIdToUse = realZoneId || zone.makhuvuc;
+
     if (JSON.stringify(supported) !== JSON.stringify(zone.supportedVehicleTypes ?? [])) {
-      await syncSupport(zone.makhuvuc, supported);
+      await syncSupport(zoneIdToUse, supported);
     }
 
     const currentDbSpotIds = draftSpots.map((s) => s.mavitri).filter(Boolean) as string[];
@@ -948,7 +995,7 @@ function ZoneEditor({
       const payload = {
         tenvitri: spot.tenvitri,
         trangthai: Number(spot.trangthai ?? 0),
-        makhuvuc: zone.makhuvuc,
+        makhuvuc: zoneIdToUse,
         mabanggia: spot.mabanggia || null,
       };
 
@@ -963,7 +1010,11 @@ function ZoneEditor({
 
     toast.success('Đã lưu sân đỗ');
     onRefresh();
-  };
+  } catch (err: any) {
+    console.error(err);
+    toast.error(err?.message ?? 'Lưu sân đỗ thất bại');
+  }
+};
 
   return (
     <div className="bg-white rounded-3xl border border-gray-200 shadow-sm p-5 space-y-4">
@@ -1734,14 +1785,32 @@ function AddZoneForm({ lotId, onCreated }: { lotId: string; onCreated: () => voi
   const [file, setFile] = useState<File | null>(null);
 
   const add = async () => {
-    let imageUrl = '';
-    if (file) {
-      const fileName = `${Date.now()}_${file.name}`;
-      const { data, error } = await supabase.storage.from('SanDo').upload(fileName, file);
-      if (error) throw error;
-      const { data: publicUrl } = supabase.storage.from('SanDo').getPublicUrl(data.path);
-      imageUrl = publicUrl.publicUrl;
-    }
+ let imageUrl = '';
+
+if (file) {
+  const safeFileName = file.name
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9._-]/g, '_');
+
+  const fileName = `zones/${Date.now()}_${safeFileName}`;
+
+  const { data, error } = await supabase.storage
+    .from('SanDo')
+    .upload(fileName, file, {
+      cacheControl: '3600',
+      upsert: false,
+    });
+
+  if (error) throw error;
+  if (!data?.path) throw new Error('Upload failed: no path returned');
+
+  const { data: publicUrl } = supabase.storage
+    .from('SanDo')
+    .getPublicUrl(data.path);
+
+  imageUrl = publicUrl.publicUrl;
+}
     const { error } = await supabase.from('khuvudo').insert({ tenkhuvuc: name, mota: desc, hinhkhuvuc: imageUrl, mabaido: lotId });
     if (error) throw error;
     toast.success('Đã thêm sân đỗ');

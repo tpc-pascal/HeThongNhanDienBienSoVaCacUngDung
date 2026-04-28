@@ -374,6 +374,9 @@ export const VehicleTypeSelection = () => {
             ? coinMap.get(String(row.mabanggia)) ?? null
             : null;
 
+            const displayType = String(row.loaixe ?? '').trim();
+const key = normalizeText(String(row.kieuxe ?? displayType));
+
           pricingMap.set(normalizeText(type), {
             mabanggia: String(row.mabanggia),
             type,
@@ -386,14 +389,14 @@ export const VehicleTypeSelection = () => {
 
         const zonePricingItems = Array.from(pricingMap.values());
 
-        const compatibleVehicles = approvedVehicleList.filter((vehicle) => {
-          const vehicleType = String(vehicle.maloai ?? '').trim();
-          if (!vehicleType) return false;
+       const compatibleVehicles = approvedVehicleList.filter((vehicle) => {
+  const vehicleType = String(vehicle.maloai ?? '').trim();
+  if (!vehicleType) return false;
 
-          return zonePricingItems.some((price) =>
-            isCompatibleVehicleType(vehicleType, price.type)
-          );
-        });
+ return zonePricingItems.some((price) =>
+  isCompatibleVehicleType(vehicleType, String(price.kieuxe ?? ''))
+);
+});
 
         if (cancelled) return;
 
@@ -437,15 +440,18 @@ export const VehicleTypeSelection = () => {
     return approvedVehicles.find((v) => v.id === selectedVehicleId) || null;
   }, [approvedVehicles, selectedVehicleId]);
 
-  const selectedVehiclePrice = useMemo(() => {
-    if (!selectedVehicle) return null;
-    return (
-      pricingItems.find((item) =>
-        isCompatibleVehicleType(String(selectedVehicle.maloai ?? ''), item.type)
-      ) || null
-    );
-  }, [pricingItems, selectedVehicle]);
+const selectedVehiclePrice = useMemo(() => {
+  if (!selectedVehicle) return null;
 
+  return (
+    pricingItems.find((item) =>
+      isCompatibleVehicleType(
+  String(selectedVehicle.maloai ?? ''),
+  String(item.kieuxe ?? '')
+)
+    ) || null
+  );
+}, [pricingItems, selectedVehicle]);
   const handleContinue = () => {
     if (!selectedVehicle || !parkingLot || !zone) return;
 
@@ -675,8 +681,11 @@ export const VehicleTypeSelection = () => {
             <div className="space-y-4">
               {approvedVehicles.map((vehicle) => {
                 const matchedPrice = pricingItems.find((item) =>
-                  isCompatibleVehicleType(String(vehicle.maloai ?? ''), item.type)
-                );
+  isCompatibleVehicleType(
+    String(vehicle.maloai ?? ''),
+    String(item.kieuxe ?? '')
+  ) // ✅
+);
 
                 const isSelected = selectedVehicleId === vehicle.id;
                 const Icon = getVehicleIcon(

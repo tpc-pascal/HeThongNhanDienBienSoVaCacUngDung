@@ -1,8 +1,14 @@
 import { useNavigate } from 'react-router-dom';
 import { Monitor, Video, User, Bell, BarChart3, Clock, FileText, AlertTriangle, GitMerge } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { supabase } from '../../utils/supabase.ts';
 
 export const SupervisorDashboard = () => {
   const navigate = useNavigate();
+  const [profile, setProfile] = useState({
+  hoten: '',
+  avatar: '',
+});
 
   const todayStats = {
     vehiclesIn: 87,
@@ -10,6 +16,34 @@ export const SupervisorDashboard = () => {
     currentVehicles: 22,
     revenue: '4.250.000đ',
   };
+
+  const getAvatarUrl = (value: string | null | undefined) => {
+  if (!value) return '';
+  if (value.startsWith('http')) return value;
+
+  const { data } = supabase.storage.from('avatars').getPublicUrl(value);
+  return data?.publicUrl || '';
+};
+useEffect(() => {
+  const loadProfile = async () => {
+    const { data: authData } = await supabase.auth.getUser();
+    const user = authData.user;
+    if (!user) return;
+
+    const { data: staffRow } = await supabase
+      .from('ctnhanvien')
+      .select('hoten, anhdaidien')
+      .eq('manguoidung', user.id)
+      .maybeSingle();
+
+    setProfile({
+      hoten: staffRow?.hoten || 'Người giám sát',
+      avatar: getAvatarUrl(staffRow?.anhdaidien),
+    });
+  };
+
+  loadProfile();
+}, []);
 
   const recentActivity = [
     { plate: '30A-12345', action: 'Vào bãi', time: '10 phút trước', status: 'success' },
@@ -23,22 +57,44 @@ export const SupervisorDashboard = () => {
       <div className="bg-gradient-to-r from-green-600 to-emerald-600 text-white">
         <div className="max-w-7xl mx-auto px-4 py-6">
           <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-2xl mb-1">Xin chào, Người giám sát</h1>
-              <p className="text-green-100 text-sm">Quản lý cổng ra vào</p>
-            </div>
+            <div className="flex items-center gap-3">
+  {/* AVATAR */}
+  <div className="w-10 h-10 rounded-full overflow-hidden bg-white/20 flex items-center justify-center">
+    {profile.avatar ? (
+      <img src={profile.avatar} className="w-full h-full object-cover" />
+    ) : (
+      <User className="w-5 h-5 text-white" />
+    )}
+  </div>
+
+  {/* NAME */}
+  <div>
+    <h1 className="text-2xl mb-1">
+      Xin chào, {profile.hoten || 'Người giám sát'}
+    </h1>
+    <p className="text-green-100 text-sm">Quản lý cổng ra vào</p>
+  </div>
+</div>
             <div className="flex items-center gap-3">
               <button className="relative p-2 hover:bg-white/10 rounded-full transition">
                 <Bell className="w-6 h-6" />
                 <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full"></span>
               </button>
               <button
-                onClick={() => navigate('/supervisor/profile')}
-                className="flex items-center gap-2 bg-white/10 hover:bg-white/20 px-4 py-2 rounded-full transition"
-              >
-                <User className="w-5 h-5" />
-                <span className="text-sm">Hồ sơ</span>
-              </button>
+  onClick={() => navigate('/supervisor/profile')}
+  className="flex items-center gap-2 bg-white/10 hover:bg-white/20 px-4 py-2 rounded-full transition"
+>
+  {/* AVATAR */}
+  <div className="w-6 h-6 rounded-full overflow-hidden bg-white/20 flex items-center justify-center">
+    {profile.avatar ? (
+      <img src={profile.avatar} className="w-full h-full object-cover" />
+    ) : (
+      <User className="w-4 h-4 text-white" />
+    )}
+  </div>
+
+  <span className="text-sm">Hồ sơ</span>
+</button>
             </div>
           </div>
         </div>
