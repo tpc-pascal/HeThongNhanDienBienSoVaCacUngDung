@@ -55,7 +55,7 @@ type SpotRow = {
 type PricingRow = {
   mabanggia: string;
   loaixe: string;
-  loaigia: 'fixed' | 'hourly' | 'daily';
+    loaigia: 'fixed' | 'hourly' | 'daily' | 'minute' | 'second';
   thanhtien: number;
   thanhtoanxuao: boolean;
   mabaido: string;
@@ -653,7 +653,7 @@ function QuickSummary({ lot }: { lot: any }) {
       </div>
       <div className="space-y-3 text-sm">
         <SummaryRow label="Trạng thái" value={lot.congkhai ? 'Công khai' : 'Riêng tư'} />
-        <SummaryRow label="Loại xe" value={vehicleTypes.length ? vehicleTypes.join(', ') : 'Chưa có'} />
+        <SummaryRow label="Loại vị trí" value={vehicleTypes.length ? vehicleTypes.join(', ') : 'Chưa có'} />
        <SummaryRow label="Bảng giá" value={`${lot.pricingCount} dòng`} />
 <SummaryRow label="Sân đỗ" value={`${lot.zonesCount} khu vực`} />
 <SummaryRow label="Vị trí" value={`${lot.totalSpots} vị trí`} />
@@ -1100,7 +1100,7 @@ const save = async () => {
               onChange={(e) => applyPricingToAll(e.target.value || null)}
               defaultValue=""
             >
-              <option value="">Chọn xe để áp dụng cho tất cả</option>
+              <option value="">Chọn loại vị trí để áp dụng cho tất cả</option>
               {pricingOptions.map((p) => (
                 <option key={p.mabanggia} value={p.mabanggia}>
                   {p.loaixe} · {p.loaigia} · {p.kieuxe}
@@ -1145,7 +1145,7 @@ const save = async () => {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Xe được phép</label>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Loại vị trí</label>
                 <select
                   value={spot.mabanggia ?? ''}
                   onChange={(e) => updateSpot(spot.id, { mabanggia: e.target.value || null })}
@@ -1247,7 +1247,7 @@ function SpotCard({
       </div>
 
       <div>
-        <label className="block text-xs font-medium text-gray-700 mb-1">Xe được phép</label>
+        <label className="block text-xs font-medium text-gray-700 mb-1">Loại vị trí</label>
         <select
           value={selectedPricingId}
           onChange={(e) => updateVehicle(e.target.value)}
@@ -1406,7 +1406,7 @@ function PricingManager({ lot, onRefresh }: { lot: any; onRefresh: () => void })
           <PricingRowCard
             key={row.mabanggia}
             row={row}
-            label={`Cấu hình loại xe #${displayIndex + 1}`}
+            label={`Cấu hình loại giá #${displayIndex + 1}`}
             onChange={(next) => updateRow(idx, next)}
             onRemove={() => remove(row, idx)}
           />
@@ -1417,10 +1417,11 @@ function PricingManager({ lot, onRefresh }: { lot: any; onRefresh: () => void })
 
   return (
     <div className="bg-white rounded-3xl border border-gray-200 shadow-sm p-6 space-y-5">
-      <EditorSectionTitle
-        title="Bảng giá"
-        desc="Tách riêng 2 miền: xe máy và xe ô tô. `kieuxe` chỉ lưu DB, không cần nhập tay trên UI."
-      />
+     <EditorSectionTitle
+  title="Bảng giá"
+  desc='Tích vào ô "Sử dụng Xu ảo?" để bật tính năng đặt chỗ trước (chỉ áp dụng cho loại giá cố định).'
+/>
+      
 
       <div className="space-y-8">
         {renderGroup('motorcycle', '🏍 Xe máy', 'text-purple-700', 'Thêm xe máy')}
@@ -1474,7 +1475,7 @@ function PricingRowCard({
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
-        <Field label="Loại xe" value={row.loaixe ?? ''} onChange={(v) => onChange({ ...row, loaixe: v })} />
+        <Field label="Loại vị trí" value={row.loaixe ?? ''} onChange={(v) => onChange({ ...row, loaixe: v })} />
         <div>
           <label className="block text-sm mb-2 text-gray-700 font-medium">Loại giá</label>
           <select
@@ -1483,9 +1484,11 @@ function PricingRowCard({
             onChange={(e) => onChange({ ...row, loaigia: e.target.value })}
             className="w-full px-4 py-3 rounded-xl border border-gray-300 bg-white disabled:bg-gray-100"
           >
-            <option value="fixed">Cố định</option>
-            <option value="hourly">Theo giờ</option>
-            <option value="daily">Theo ngày</option>
+       <option value="fixed">Cố định</option>
+<option value="second">Theo giây</option>
+<option value="minute">Theo phút</option>
+<option value="hourly">Theo giờ</option>
+<option value="daily">Theo ngày</option>
           </select>
         </div>
 

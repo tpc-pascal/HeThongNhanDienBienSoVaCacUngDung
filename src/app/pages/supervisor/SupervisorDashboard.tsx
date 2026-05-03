@@ -1,14 +1,16 @@
 import { useNavigate } from 'react-router-dom';
-import { Monitor, Video, User, Bell, BarChart3, Clock, FileText, AlertTriangle, GitMerge } from 'lucide-react';
+import { Monitor, Video, User, Bell, BarChart3, Clock, FileText, AlertTriangle, GitMerge, MessageSquare, Loader2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { supabase } from '../../utils/supabase.ts';
+import { toast } from 'sonner';
 
 export const SupervisorDashboard = () => {
   const navigate = useNavigate();
+  const [loading, setLoading] = useState(true);
   const [profile, setProfile] = useState({
-  hoten: '',
-  avatar: '',
-});
+    hoten: '',
+    avatar: '',
+  });
 
   const todayStats = {
     vehiclesIn: 87,
@@ -18,38 +20,85 @@ export const SupervisorDashboard = () => {
   };
 
   const getAvatarUrl = (value: string | null | undefined) => {
-  if (!value) return '';
-  if (value.startsWith('http')) return value;
-
-  const { data } = supabase.storage.from('avatars').getPublicUrl(value);
-  return data?.publicUrl || '';
-};
-useEffect(() => {
-  const loadProfile = async () => {
-    const { data: authData } = await supabase.auth.getUser();
-    const user = authData.user;
-    if (!user) return;
-
-    const { data: staffRow } = await supabase
-      .from('ctnhanvien')
-      .select('hoten, anhdaidien')
-      .eq('manguoidung', user.id)
-      .maybeSingle();
-
-    setProfile({
-      hoten: staffRow?.hoten || 'Người giám sát',
-      avatar: getAvatarUrl(staffRow?.anhdaidien),
-    });
+    if (!value) return '';
+    if (value.startsWith('http')) return value;
+    const { data } = supabase.storage.from('avatars').getPublicUrl(value);
+    return data?.publicUrl || '';
   };
 
-  loadProfile();
-}, []);
+  useEffect(() => {
+    const loadProfile = async () => {
+      try {
+        setLoading(true);
+        // 1. Kiểm tra Auth
+        const { data: authData, error: authError } = await supabase.auth.getUser();
+        if (authError || !authData.user) {
+          toast.error('Không xác thực được tài khoản');
+          navigate('/login');
+          return;
+        }
+
+        const user = authData.user;
+
+        // 2. Kiểm tra chính xác Role từ Database (Tránh kẹt state)
+        const { data: userRole, error: roleError } = await supabase
+          .from('nguoidung')
+          .select('chucnang')
+          .eq('manguoidung', user.id)
+          .maybeSingle();
+
+        if (roleError || !userRole) {
+          toast.error('Không tìm thấy thông tin tài khoản');
+          navigate('/login');
+          return;
+        }
+
+        // BẢO VỆ: Nếu không phải supervisor, đá về trang chủ của họ
+        if (userRole.chucnang !== 'supervisor') {
+          console.warn('Sai Role! Chuyển hướng về trang đúng.');
+          // Dùng window.location.href để ép reload state
+          window.location.href = `/${userRole.chucnang}`; 
+          return;
+        }
+
+        // 3. Load thông tin nhân viên
+        const { data: staffRow } = await supabase
+          .from('ctnhanvien')
+          .select('hoten, anhdaidien')
+          .eq('manguoidung', user.id)
+          .maybeSingle();
+
+        setProfile({
+          hoten: staffRow?.hoten || 'Người giám sát',
+          avatar: getAvatarUrl(staffRow?.anhdaidien),
+        });
+      } catch (error) {
+        console.error('Lỗi load Supervisor:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    void loadProfile();
+  }, [navigate]);
 
   const recentActivity = [
     { plate: '30A-12345', action: 'Vào bãi', time: '10 phút trước', status: 'success' },
     { plate: '51B-67890', action: 'Ra bãi', time: '15 phút trước', status: 'success' },
     { plate: '29C-11223', action: 'Vào bãi', time: '23 phút trước', status: 'success' },
   ];
+
+  // Hiển thị màn hình Loading trong lúc đợi xác thực
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <Loader2 className="w-10 h-10 animate-spin text-green-600 mx-auto mb-4" />
+          <p className="text-gray-600 font-medium">Đang tải không gian làm việc...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -58,43 +107,50 @@ useEffect(() => {
         <div className="max-w-7xl mx-auto px-4 py-6">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-  {/* AVATAR */}
-  <div className="w-10 h-10 rounded-full overflow-hidden bg-white/20 flex items-center justify-center">
-    {profile.avatar ? (
-      <img src={profile.avatar} className="w-full h-full object-cover" />
-    ) : (
-      <User className="w-5 h-5 text-white" />
-    )}
-  </div>
+              {/* AVATAR */}
+              <div className="w-10 h-10 rounded-full overflow-hidden bg-white/20 flex items-center justify-center">
+                {profile.avatar ? (
+                  <img src={profile.avatar} className="w-full h-full object-cover" />
+                ) : (
+                  <User className="w-5 h-5 text-white" />
+                )}
+              </div>
 
-  {/* NAME */}
-  <div>
-    <h1 className="text-2xl mb-1">
-      Xin chào, {profile.hoten || 'Người giám sát'}
-    </h1>
-    <p className="text-green-100 text-sm">Quản lý cổng ra vào</p>
-  </div>
-</div>
+              {/* NAME */}
+              <div>
+                <h1 className="text-2xl mb-1">
+                  Xin chào, {profile.hoten || 'Người giám sát'}
+                </h1>
+                <p className="text-green-100 text-sm">Quản lý cổng ra vào</p>
+              </div>
+            </div>
             <div className="flex items-center gap-3">
               <button className="relative p-2 hover:bg-white/10 rounded-full transition">
                 <Bell className="w-6 h-6" />
                 <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full"></span>
               </button>
-              <button
-  onClick={() => navigate('/supervisor/profile')}
-  className="flex items-center gap-2 bg-white/10 hover:bg-white/20 px-4 py-2 rounded-full transition"
->
-  {/* AVATAR */}
-  <div className="w-6 h-6 rounded-full overflow-hidden bg-white/20 flex items-center justify-center">
-    {profile.avatar ? (
-      <img src={profile.avatar} className="w-full h-full object-cover" />
-    ) : (
-      <User className="w-4 h-4 text-white" />
-    )}
-  </div>
 
-  <span className="text-sm">Hồ sơ</span>
-</button>
+              <button
+                onClick={() => navigate('/internal-chat')}
+                className="flex items-center gap-2 bg-white/10 hover:bg-white/20 px-4 py-2 rounded-full transition"
+              >
+                <MessageSquare className="w-5 h-5" />
+                <span className="text-sm">Chat nội bộ</span>
+              </button>
+
+              <button
+                onClick={() => navigate('/supervisor/profile')}
+                className="flex items-center gap-2 bg-white/10 hover:bg-white/20 px-4 py-2 rounded-full transition"
+              >
+                <div className="w-6 h-6 rounded-full overflow-hidden bg-white/20 flex items-center justify-center">
+                  {profile.avatar ? (
+                    <img src={profile.avatar} className="w-full h-full object-cover" />
+                  ) : (
+                    <User className="w-4 h-4 text-white" />
+                  )}
+                </div>
+                <span className="text-sm">Hồ sơ</span>
+              </button>
             </div>
           </div>
         </div>

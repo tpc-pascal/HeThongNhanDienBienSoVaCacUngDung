@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { notifyChange, listenChange } from '../../utils/realtimeSync.ts'; 
 import {
   ArrowLeft,
   Star,
@@ -19,6 +20,12 @@ type NguoiDungRow = {
   manguoidung: string;
   tennguoidung: string | null;
   chucnang: string | null;
+  email: string | null;
+};
+
+type NhanVienRow = {
+  manguoidung: string;
+  hoten: string | null;
 };
 
 type ParkingLotInfo = {
@@ -115,7 +122,7 @@ export const ParkingReviews = () => {
 
   const currentUserId = user?.id ?? '';
   const currentUserName = user?.name ?? user?.email ?? 'Người dùng';
-
+  const [currentDisplayName, setCurrentDisplayName] = useState('');
   const [parkingLot, setParkingLot] = useState<ParkingLotInfo | null>(null);
   const [reviews, setReviews] = useState<ReviewItem[]>([]);
   const [userRole, setUserRole] = useState<string>('owner');
@@ -127,6 +134,7 @@ export const ParkingReviews = () => {
   const [filterRating, setFilterRating] = useState<number | null>(null);
   const [commentText, setCommentText] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
+ const syncKey = useMemo(() => `parking-reviews:${parkingId}`, [parkingId]);
 
   const currentUser = {
     id: currentUserId,
@@ -136,11 +144,132 @@ export const ParkingReviews = () => {
 
   const handleBackButton = () => navigate(-1);
 
-  const renderDisplayName = (name: string, role?: string | null) => {
-    if (!role || role === 'owner') return name;
-    const label = ROLE_LABEL[role] ?? role;
-    return label ? `${name} (${label})` : name;
+const renderDisplayName = (name: string | null | undefined, role?: string | null) => {
+  const displayName = (name ?? '').trim();
+  if (!displayName) return '';
+
+  if (!role || role === 'owner') return displayName;
+
+  const label = ROLE_LABEL[role] ?? role;
+  return label ? `${displayName} (${label})` : displayName;
+};
+
+const canDeleteComment = (comment: CommentItem) => {
+  const now = Date.now();
+  const created = new Date(comment.createdAt).getTime();
+
+  return (
+    comment.userId === currentUserId &&
+    now - created <= 10000 // 10 giây
+  );
+};
+
+const handleDeleteComment = async (commentId: string) => {
+  const { error } = await supabase
+    .from('chi_tiet_bai_dang')
+    .delete()
+    .eq('ma_chi_tiet', commentId);
+
+  if (error) {
+    toast.error('Không thể xoá bình luận');
+    return;
+  }
+
+  await fetchReviews();
+  notifyChange(syncKey);
+};
+// chèn ở gần các useEffect hiện có
+useEffect(() => {
+  if (!parkingId) return;
+
+  // nghe thay đổi từ DB
+  const channel = supabase
+    .channel(syncKey)
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'chi_tiet_bai_dang' },
+      () => {
+        void fetchReviews();
+      },
+    )
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'bai_dang_danh_gia' },
+      () => {
+        void fetchReviews();
+      },
+    )
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'danh_gia' },
+      () => {
+        void fetchParking();
+      },
+    )
+    .subscribe();
+
+  // nghe sync giữa các tab / các page khác trong app
+  const stop = listenChange(syncKey, () => {
+    void fetchReviews();
+    void fetchParking();
+  });
+
+  return () => {
+    stop();
+    void supabase.removeChannel(channel);
   };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [parkingId, syncKey]);
+
+useEffect(() => {
+  const fetchCurrentUserName = async () => {
+    if (!currentUserId) return;
+
+    const { data: userData } = await supabase
+      .from('nguoidung')
+      .select('manguoidung, tennguoidung, chucnang, email')
+      .eq('manguoidung', currentUserId)
+      .maybeSingle();
+
+    if (!userData) return;
+
+    let name = '';
+
+    // nếu là nhân viên -> lấy hoten
+    if (
+      userData.chucnang === 'admin' ||
+      userData.chucnang === 'supervisor' ||
+      userData.chucnang === 'support'
+    ) {
+      const { data: staff } = await supabase
+        .from('ctnhanvien')
+        .select('hoten')
+        .eq('manguoidung', currentUserId)
+        .maybeSingle();
+
+      if (staff?.hoten?.trim()) {
+        name = staff.hoten.trim();
+      }
+    }
+
+    // fallback
+    if (!name) {
+      name =
+        userData.tennguoidung?.trim() ||
+        userData.email?.trim() ||
+        '';
+    }
+
+    setCurrentDisplayName(name);
+  };
+
+  fetchCurrentUserName();
+}, [currentUserId]);
+
+
+
+
+
 
   const filteredReviews = useMemo(() => {
     if (filterRating === null) return reviews;
@@ -163,38 +292,39 @@ export const ParkingReviews = () => {
     setShowReviewModal(true);
   };
 
-  const ensureParkingStatus = async (): Promise<RatingStatusRow | null> => {
-    if (!parkingId) return null;
+const ensureParkingStatus = async (): Promise<RatingStatusRow | null> => {
+  if (!parkingId) return null;
 
-    const { data: existing, error: lookupError } = await supabase
-      .from('danh_gia')
-      .select('ma_trang_danh_gia, mabaido, so_sao')
-      .eq('mabaido', parkingId)
-      .maybeSingle();
+  const { data: existingRows, error: lookupError } = await supabase
+    .from('danh_gia')
+    .select('ma_trang_danh_gia, mabaido, so_sao')
+    .eq('mabaido', parkingId)
+    .limit(1);
 
-    if (lookupError) {
-      toast.error('Không kiểm tra được trạng thái đánh giá của bãi đỗ');
-      return null;
-    }
+  if (lookupError) {
+    toast.error('Không kiểm tra được trạng thái đánh giá của bãi đỗ');
+    return null;
+  }
 
-    if (existing?.ma_trang_danh_gia) return existing as RatingStatusRow;
+  const existing = existingRows?.[0];
+  if (existing?.ma_trang_danh_gia) return existing as RatingStatusRow;
 
-    const { data: inserted, error: insertError } = await supabase
-      .from('danh_gia')
-      .insert({
-        mabaido: parkingId,
-        so_sao: 0,
-      })
-      .select('ma_trang_danh_gia, mabaido, so_sao')
-      .maybeSingle();
+  const { data: insertedRows, error: insertError } = await supabase
+    .from('danh_gia')
+    .insert({
+      mabaido: parkingId,
+      so_sao: 0,
+    })
+    .select('ma_trang_danh_gia, mabaido, so_sao')
+    .limit(1);
 
-    if (insertError) {
-      toast.error('Không khởi tạo được trạng thái đánh giá');
-      return null;
-    }
+  if (insertError) {
+    toast.error('Không khởi tạo được trạng thái đánh giá');
+    return null;
+  }
 
-    return inserted as RatingStatusRow;
-  };
+  return (insertedRows?.[0] ?? null) as RatingStatusRow | null;
+};
 
   const refreshAverageRating = async (ratingStatusId: string) => {
     const { data: reviewStars, error: reviewStarError } = await supabase
@@ -249,11 +379,13 @@ export const ParkingReviews = () => {
       toast.error('Không tải được thông tin bãi đỗ');
     }
 
-    const { data: ratingStatus, error: ratingStatusError } = await supabase
-      .from('danh_gia')
-      .select('ma_trang_danh_gia, mabaido, so_sao')
-      .eq('mabaido', parkingId)
-      .maybeSingle();
+  const { data: ratingStatusRows, error: ratingStatusError } = await supabase
+  .from('danh_gia')
+  .select('ma_trang_danh_gia, mabaido, so_sao')
+  .eq('mabaido', parkingId)
+  .limit(1);
+
+const ratingStatus = ratingStatusRows?.[0] ?? null;
 
     if (ratingStatusError) {
       toast.error('Không tải được thông tin đánh giá');
@@ -278,7 +410,7 @@ export const ParkingReviews = () => {
 
     const { data: userData } = await supabase
       .from('nguoidung')
-      .select('manguoidung, tennguoidung, chucnang')
+      .select('manguoidung, tennguoidung, chucnang, email')
       .eq('manguoidung', currentUserId)
       .maybeSingle();
 
@@ -420,19 +552,28 @@ export const ParkingReviews = () => {
         new Set([...reviewAuthorIds, ...commentAuthorIds].filter(Boolean)),
       );
 
-      let usersData: NguoiDungRow[] = [];
-      if (allUserIds.length > 0) {
-        const { data: users, error: userError } = await supabase
-          .from('nguoidung')
-          .select('manguoidung, tennguoidung, chucnang')
-          .in('manguoidung', allUserIds);
+  
+    
 
-        if (userError) {
-          toast.error('Không tải được thông tin người dùng');
-        }
 
-        usersData = (users ?? []) as NguoiDungRow[];
-      }
+
+const { data: users, error: userError } = await supabase
+  .from('nguoidung')
+  .select('manguoidung, tennguoidung, chucnang, email')
+  .in('manguoidung', allUserIds);
+
+const usersData = (users ?? []) as NguoiDungRow[];
+
+const { data: staffRows, error: staffError } = await supabase
+  .from('ctnhanvien')
+  .select('manguoidung, hoten')
+  .in('manguoidung', allUserIds);
+
+const staffData = (staffRows ?? []) as NhanVienRow[];
+const staffMap = new Map<string, string>(
+  staffData.map((row) => [row.manguoidung, row.hoten ?? '']),
+);
+
 
       const userMap = new Map<string, NguoiDungRow>();
       usersData.forEach((u) => userMap.set(u.manguoidung, u));
@@ -441,15 +582,22 @@ export const ParkingReviews = () => {
       commentsData
         .sort((a, b) => new Date(a.ngay_tao ?? 0).getTime() - new Date(b.ngay_tao ?? 0).getTime())
         .forEach((comment) => {
-          const author = userMap.get(comment.manguoidung);
-          const item: CommentItem = {
-            id: comment.ma_chi_tiet,
-            userId: comment.manguoidung,
-            userName: author?.tennguoidung ?? 'Người dùng',
-            userRole: author?.chucnang ?? 'owner',
-            content: comment.noi_dung ?? '',
-            createdAt: comment.ngay_tao ?? new Date().toISOString(),
-          };
+      const author = userMap.get(comment.manguoidung);
+const staffHoten = staffMap.get(comment.manguoidung);
+
+const item: CommentItem = {
+  id: comment.ma_chi_tiet,
+  userId: comment.manguoidung,
+  userName:
+    (author?.chucnang === 'admin' ||
+      author?.chucnang === 'supervisor' ||
+      author?.chucnang === 'support')
+      ? (staffHoten?.trim() || author?.tennguoidung?.trim() || author?.email?.trim() || '')
+      : (author?.tennguoidung?.trim() || author?.email?.trim() || ''),
+  userRole: author?.chucnang ?? 'owner',
+  content: comment.noi_dung ?? '',
+  createdAt: comment.ngay_tao ?? new Date().toISOString(),
+};
 
           const current = commentsByReviewId.get(comment.ma_bai_dang) ?? [];
           current.push(item);
@@ -457,22 +605,28 @@ export const ParkingReviews = () => {
         });
 
       const mappedReviews: ReviewItem[] = reviewData.map((row) => {
-        const author = userMap.get(row.manguoidung);
-        return {
-          id: row.ma_bai_dang,
-          ratingStatusId: row.ma_trang_danh_gia,
-          authorId: row.manguoidung,
-          authorName: author?.tennguoidung ?? 'Người dùng',
-          authorRole: author?.chucnang ?? 'owner',
-          title: (row.tieu_de ?? 'ĐÁNH GIÁ').trim() || 'ĐÁNH GIÁ',
-          content: row.noi_dung ?? '',
-          rating: Number(row.so_sao ?? 0),
-          likes: Number(row.so_luot_thich ?? 0),
-          comments: commentsByReviewId.get(row.ma_bai_dang) ?? [],
-          createdAt: row.ngay_tao ?? new Date().toISOString(),
-          likedBy: [],
-        };
-      });
+       const author = userMap.get(row.manguoidung);
+const staffHoten = staffMap.get(row.manguoidung);
+
+return {
+  id: row.ma_bai_dang,
+  ratingStatusId: row.ma_trang_danh_gia,
+  authorId: row.manguoidung,
+  authorName:
+    (author?.chucnang === 'admin' ||
+      author?.chucnang === 'supervisor' ||
+      author?.chucnang === 'support')
+      ? (staffHoten?.trim() || author?.tennguoidung?.trim() || author?.email?.trim() || '')
+      : (author?.tennguoidung?.trim() || author?.email?.trim() || ''),
+  authorRole: author?.chucnang ?? 'owner',
+  title: (row.tieu_de ?? 'ĐÁNH GIÁ').trim() || 'ĐÁNH GIÁ',
+  content: row.noi_dung ?? '',
+  rating: Number(row.so_sao ?? 0),
+  likes: Number(row.so_luot_thich ?? 0),
+  comments: commentsByReviewId.get(row.ma_bai_dang) ?? [],
+  createdAt: row.ngay_tao ?? new Date().toISOString(),
+  likedBy: [],
+};   });
 
       setReviews(mappedReviews);
       setParkingLot((prev) =>
@@ -516,15 +670,18 @@ export const ParkingReviews = () => {
       ),
     );
 
-    const { error } = await supabase
-      .from('bai_dang_danh_gia')
-      .update({ so_luot_thich: nextLikes })
-      .eq('ma_bai_dang', reviewId);
+  const { error } = await supabase
+  .from('bai_dang_danh_gia')
+  .update({ so_luot_thich: nextLikes })
+  .eq('ma_bai_dang', reviewId);
 
-    if (error) {
-      toast.error('Không thể cập nhật lượt thích');
-      await fetchReviews();
-    }
+if (error) {
+  toast.error('Không thể cập nhật lượt thích');
+  await fetchReviews();
+  return;
+}
+
+notifyChange(syncKey);
   };
 
   const handleAddComment = async (reviewId: string) => {
@@ -541,23 +698,31 @@ export const ParkingReviews = () => {
     const content = commentText[reviewId]?.trim();
     if (!content) return;
 
-    const { error } = await supabase.from('chi_tiet_bai_dang').insert({
-      manguoidung: currentUserId,
-      ma_bai_dang: reviewId,
-      noi_dung: content,
-    });
+ const { error } = await supabase.from('chi_tiet_bai_dang').insert({
+  manguoidung: currentUserId,
+  ma_bai_dang: reviewId,
+  noi_dung: content,
+});
 
-    if (error) {
-      toast.error('Không thể thêm bình luận');
-      return;
-    }
+if (error) {
+  toast.error('Không thể thêm bình luận');
+  return;
+}
 
-    setCommentText((prev) => ({ ...prev, [reviewId]: '' }));
-    await fetchReviews();
-    toast.success('Đã thêm bình luận');
+setCommentText((prev) => ({ ...prev, [reviewId]: '' }));
+await fetchReviews();
+notifyChange(syncKey);
+toast.success('Đã thêm bình luận');
+
+
+    
   };
 
-  const handleSubmitReview = async () => {
+const handleSubmitReview = async () => {
+  if (loading) return;
+  setLoading(true);
+
+  try {
     if (!currentUserId) {
       toast.error('Bạn cần đăng nhập');
       return;
@@ -591,11 +756,10 @@ export const ParkingReviews = () => {
     const ratingStatus = await ensureParkingStatus();
     if (!ratingStatus) return;
 
-    // ✅ kiểm tra bài viết TẠI 1 BÃI (không phải toàn hệ thống)
     const { data: existingReview, error: existingReviewError } = await supabase
       .from('bai_dang_danh_gia')
-      .select('ma_bai_dang, manguoidung, ma_trang_danh_gia')
-      .eq('ma_trang_danh_gia', ratingStatus.ma_trang_danh_gia) // 👈 CHỈ cùng bãi
+      .select('ma_bai_dang, manguoidung')
+      .eq('ma_trang_danh_gia', ratingStatus.ma_trang_danh_gia)
       .eq('manguoidung', currentUserId)
       .maybeSingle();
 
@@ -638,14 +802,21 @@ export const ParkingReviews = () => {
       }
     }
 
-    await refreshAverageRating(ratingStatus.ma_trang_danh_gia);
-    await fetchReviews();
+   await refreshAverageRating(ratingStatus.ma_trang_danh_gia);
+await fetchReviews();
+notifyChange(syncKey);
 
-    setShowReviewModal(false);
-    setEditingReviewId(null);
-    setDraft(EMPTY_DRAFT);
-    toast.success('Đánh giá của bạn đã được lưu');
-  };
+setShowReviewModal(false);
+setEditingReviewId(null);
+setDraft(EMPTY_DRAFT);
+toast.success('Đánh giá của bạn đã được lưu');
+  } catch (err) {
+    console.error(err);
+    toast.error('Lỗi không xác định');
+  } finally {
+    setLoading(false);
+  }
+};
 
   const handleDeleteReview = async (reviewId: string) => {
     if (!currentUserId) return;
@@ -687,6 +858,7 @@ export const ParkingReviews = () => {
 
     await refreshAverageRating(review.ratingStatusId);
     await fetchReviews();
+    notifyChange(syncKey);
     toast.success('Đã gỡ bài đánh giá');
   };
 
@@ -904,21 +1076,32 @@ export const ParkingReviews = () => {
 
                       {review.comments.length > 0 && (
                         <div className="mt-4 pt-4 border-t space-y-3">
-                          {review.comments.map((comment) => (
-                            <div key={comment.id} className="flex gap-3">
-                              <div className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center text-gray-600 text-sm">
-                                {(comment.userName?.[0] ?? 'U').toUpperCase()}
-                              </div>
-                              <div className="flex-1 bg-gray-50 rounded-lg p-3">
-                                <div className="text-sm text-gray-900 mb-1">
-                                  {renderDisplayName(comment.userName, comment.userRole)}
-                                </div>
-                                <p className="text-sm text-gray-700 whitespace-pre-line">
-                                  {comment.content}
-                                </p>
-                              </div>
-                            </div>
-                          ))}
+                        {review.comments.map((comment) => (
+  <div key={comment.id} className="flex gap-3">
+    <div className="w-8 h-8 bg-gray-100 rounded-full flex items-center justify-center text-gray-600 text-sm">
+      {(comment.userName?.[0] ?? 'U').toUpperCase()}
+    </div>
+
+    <div className="flex-1 bg-gray-50 rounded-lg p-3 relative">
+      <div className="text-sm text-gray-900 mb-1">
+        {renderDisplayName(comment.userName, comment.userRole)}
+      </div>
+
+      <p className="text-sm text-gray-700 whitespace-pre-line">
+        {comment.content}
+      </p>
+
+      {canDeleteComment(comment) && (
+        <button
+          onClick={() => handleDeleteComment(comment.id)}
+          className="absolute top-2 right-2 text-red-500 text-xs hover:underline"
+        >
+          Xoá
+        </button>
+      )}
+    </div>
+  </div>
+))}
                         </div>
                       )}
 
@@ -1013,7 +1196,7 @@ export const ParkingReviews = () => {
                 <div>
                   <label className="block text-sm text-gray-700 mb-2">Người đăng</label>
                   <div className="w-full px-4 py-3 border border-gray-200 rounded-lg bg-gray-50 text-gray-700">
-                    {renderDisplayName(currentUser.name, currentUser.role)}
+                  {renderDisplayName(currentDisplayName, currentUser.role)}
                   </div>
                 </div>
               </div>
@@ -1046,6 +1229,7 @@ export const ParkingReviews = () => {
               </button>
               <button
                 onClick={handleSubmitReview}
+                  disabled={loading}
                 className="flex-1 bg-gradient-to-r from-purple-600 to-pink-600 text-white py-3 rounded-lg hover:shadow-lg transition-all"
               >
                 {editingReviewId ? 'Lưu thay đổi' : 'Gửi đánh giá'}

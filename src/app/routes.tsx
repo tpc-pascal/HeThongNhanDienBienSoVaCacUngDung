@@ -1,4 +1,4 @@
-import { createBrowserRouter, Navigate } from "react-router-dom";
+import { createBrowserRouter, Navigate,useLocation  } from "react-router-dom";
 import { ReactNode } from "react";
 
 import { Login } from "./pages/Login.tsx";
@@ -58,7 +58,7 @@ import { MaintenanceSchedule } from "./pages/provider/MaintenanceSchedule.tsx";
 import { CommunityFeed } from "./pages/community/CommunityFeed.tsx";
 import { ParkingReviews } from "./pages/community/ParkingReviews.tsx";
 import { TheftReportPage } from "./pages/community/TheftReportPage.tsx";
-import { SupportPage } from "./pages/community/SupportPage.tsx";
+import  SupportPage  from "./pages/community/SupportPage.tsx";
 import { CommunityChat } from "./pages/community/CommunityChat.tsx";
 import { CoinGames } from "./pages/community/CoinGames.tsx";
 
@@ -85,7 +85,14 @@ function Guard({
   allowedRoles: string[];
   children: ReactNode;
 }) {
-  return <ProtectedRoute allowedRoles={allowedRoles}>{children}</ProtectedRoute>;
+  const location = useLocation(); // Lấy location hiện tại
+  
+  return (
+    // THÊM key={location.pathname} VÀO ĐÂY
+    <ProtectedRoute key={location.pathname} allowedRoles={allowedRoles}>
+      {children}
+    </ProtectedRoute>
+  );
 }
 
 export const router = createBrowserRouter([
@@ -227,7 +234,7 @@ export const router = createBrowserRouter([
     errorElement: <ErrorBoundary />,
   },
   {
-    path: "/owner/parking-lots",
+    path: "/shared/parking-lots",
     element: (
       <Guard allowedRoles={ALL_ROLES}>
         <BrowseParkingLots />
@@ -236,7 +243,7 @@ export const router = createBrowserRouter([
     errorElement: <ErrorBoundary />,
   },
   {
-    path: "/owner/parking-lot/:id",
+    path: "/shared/parking-lot/:id",
     element: (
       <Guard allowedRoles={ALL_ROLES}>
         <ParkingLotDetails />
@@ -245,7 +252,7 @@ export const router = createBrowserRouter([
     errorElement: <ErrorBoundary />,
   },
   {
-    path: "/owner/parking/:lotId/zones",
+    path: "/shared/parking/:lotId/zones",
     element: (
       <Guard allowedRoles={OWNER_ROLES}>
         <ParkingZoneSelection />
@@ -254,7 +261,7 @@ export const router = createBrowserRouter([
     errorElement: <ErrorBoundary />,
   },
   {
-    path: "/owner/parking/:lotId/zone/:zoneId/select-vehicle",
+    path: "/shared/parking/:lotId/zone/:zoneId/select-vehicle",
     element: (
       <Guard allowedRoles={OWNER_ROLES}>
         <VehicleTypeSelection />
@@ -263,7 +270,7 @@ export const router = createBrowserRouter([
     errorElement: <ErrorBoundary />,
   },
   {
-    path: "/owner/parking/:lotId/zone/:zoneId/vehicle/:vehicleId/select-spot",
+    path: "/shared/parking/:lotId/zone/:zoneId/vehicle/:vehicleId/select-spot",
     element: (
       <Guard allowedRoles={OWNER_ROLES}>
         <SpotSelection />

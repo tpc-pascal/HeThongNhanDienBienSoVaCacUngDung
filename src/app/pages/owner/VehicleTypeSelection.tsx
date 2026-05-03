@@ -333,14 +333,15 @@ export const VehicleTypeSelection = () => {
 
         const approvedVehicleList = (vehicleData || []) as VehicleRow[];
 
-        const { data: priceRows, error: priceError } = await supabase
-          .from('banggia')
-          .select(
-            'mabanggia, loaixe, loaigia, thanhtien, thanhtoanxuao, mabaido, kieuxe'
-          )
-          .eq('mabaido', resolvedLotId)
-          .eq('loaigia', 'fixed')
-          .order('loaixe', { ascending: true });
+       const { data: priceRows, error: priceError } = await supabase
+  .from('banggia')
+  .select(
+    'mabanggia, loaixe, loaigia, thanhtien, thanhtoanxuao, mabaido, kieuxe'
+  )
+  .eq('mabaido', resolvedLotId)
+  .eq('loaigia', 'fixed')
+  .eq('thanhtoanxuao', true)
+  .order('loaixe', { ascending: true });
 
         if (cancelled) return;
         if (priceError) throw priceError;
@@ -365,27 +366,19 @@ export const VehicleTypeSelection = () => {
 
         const pricingMap = new Map<string, PricingItem>();
 
-        priceList.forEach((row) => {
-          const type = String(row.loaixe ?? '').trim();
-          if (!type) return;
+       priceList.forEach((row) => {
+  const type = String(row.loaixe ?? '').trim();
+  if (!type) return;
 
-          const cashOnly = !Boolean(row.thanhtoanxuao);
-          const coinPrice = row.thanhtoanxuao
-            ? coinMap.get(String(row.mabanggia)) ?? null
-            : null;
-
-            const displayType = String(row.loaixe ?? '').trim();
-const key = normalizeText(String(row.kieuxe ?? displayType));
-
-          pricingMap.set(normalizeText(type), {
-            mabanggia: String(row.mabanggia),
-            type,
-            kieuxe: row.kieuxe,
-            cashOnly,
-            price: Number(row.thanhtien ?? 0),
-            coinPrice,
-          });
-        });
+  pricingMap.set(String(row.mabanggia), {
+    mabanggia: String(row.mabanggia),
+    type,
+    kieuxe: row.kieuxe,
+    cashOnly: false,
+    price: Number(row.thanhtien ?? 0),
+    coinPrice: coinMap.get(String(row.mabanggia)) ?? null,
+  });
+});
 
         const zonePricingItems = Array.from(pricingMap.values());
 
@@ -455,7 +448,7 @@ const selectedVehiclePrice = useMemo(() => {
   const handleContinue = () => {
     if (!selectedVehicle || !parkingLot || !zone) return;
 
-    const targetUrl = `/owner/parking/${parkingLot.id}/zone/${zone.id}/vehicle/${selectedVehicle.id}/select-spot`;
+    const targetUrl = `/shared/parking/${parkingLot.id}/zone/${zone.id}/vehicle/${selectedVehicle.id}/select-spot`;
     globalThis.location.replace(targetUrl);
   };
 

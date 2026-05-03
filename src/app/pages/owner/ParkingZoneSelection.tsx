@@ -188,11 +188,12 @@ export const ParkingZoneSelection = () => {
       if (spotError) throw spotError;
 
       const { data: priceRows, error: priceError } = await supabase
-        .from('banggia')
-        .select('mabanggia,loaixe,loaigia,thanhtien,thanhtoanxuao,kieuxe')
-        .eq('mabaido', resolvedLotId)
-        .eq('loaigia', 'fixed')
-        .order('mabanggia', { ascending: true });
+  .from('banggia')
+  .select('mabanggia,loaixe,loaigia,thanhtien,thanhtoanxuao,kieuxe')
+  .eq('mabaido', resolvedLotId)
+  .eq('loaigia', 'fixed')
+  .eq('thanhtoanxuao', true)
+  .order('mabanggia', { ascending: true });
 
       if (priceError) throw priceError;
 
@@ -210,14 +211,14 @@ export const ParkingZoneSelection = () => {
         const id = String(row.mabanggia);
         const vehicleKind = normalizeVehicleKind(row.kieuxe);
 
-        priceMap.set(id, {
-          id,
-          type: row.loaixe ?? '',
-          vehicleKind,
-          cashAndCoin: Boolean(row.thanhtoanxuao),
-          price: Number(row.thanhtien ?? 0),
-          coinPrice: row.thanhtoanxuao ? 0 : -1,
-        });
+     priceMap.set(id, {
+  id,
+  type: row.loaixe ?? '',
+  vehicleKind,
+  cashAndCoin: true,
+  price: Number(row.thanhtien ?? 0),
+  coinPrice: 0,
+});
       });
 
       (coinRows ?? []).forEach((row: CoinRow) => {
@@ -243,16 +244,16 @@ export const ParkingZoneSelection = () => {
           const zoneKey = String(zone.makhuvuc);
           const spots = zoneSpotMap.get(zoneKey) ?? [];
 
-          const pricingItems = uniq(
-            spots.map((spot) => String(spot.mabanggia ?? '').trim()).filter(Boolean),
-          )
-            .map((pricingId) => priceMap.get(pricingId))
-            .filter((item): item is PricingView => Boolean(item))
-            .sort((a, b) => {
-              const kindOrder = Number(a.vehicleKind !== b.vehicleKind);
-              if (kindOrder !== 0) return kindOrder;
-              return String(a.type).localeCompare(String(b.type), 'vi');
-            });
+         const pricingItems = uniq(
+  spots.map((spot) => String(spot.mabanggia ?? '').trim()).filter(Boolean),
+)
+  .map((pricingId) => priceMap.get(pricingId))
+  .filter((item): item is PricingView => Boolean(item && item.cashAndCoin))
+  .sort((a, b) => {
+    const kindOrder = Number(a.vehicleKind !== b.vehicleKind);
+    if (kindOrder !== 0) return kindOrder;
+    return String(a.type).localeCompare(String(b.type), 'vi');
+  });
 
           if (pricingItems.length === 0) {
             return null;
@@ -535,11 +536,7 @@ export const ParkingZoneSelection = () => {
                   {zone.availableSpots}/{zone.totalSpots} chỗ trống
                 </div>
 
-                {zone.hasVirtualCoin && (
-                  <div className="absolute top-4 left-4 bg-amber-500 text-white px-3 py-1.5 rounded-full text-sm font-bold shadow">
-                    Xu ảo
-                  </div>
-                )}
+                
               </div>
 
               <div className="p-6">
@@ -589,9 +586,8 @@ export const ParkingZoneSelection = () => {
                             <div className="min-w-0">
                               <div className="font-semibold text-gray-900 truncate">{item.type}</div>
                               <div className="text-xs text-gray-500">
-                                {getVehicleLabelByKind(item.vehicleKind)}
-                                {item.cashAndCoin ? ' · Tiền + xu ảo' : ' · Tiền'}
-                              </div>
+  {getVehicleLabelByKind(item.vehicleKind)} · Hỗ trợ xu ảo
+</div>
                             </div>
                           </div>
 
@@ -607,7 +603,7 @@ export const ParkingZoneSelection = () => {
                 </div>
 
                 <button
-                  onClick={() => globalThis.location.href = `/owner/parking/${lotId}/zone/${zone.makhuvuc}/select-vehicle`}
+                  onClick={() => globalThis.location.href = `/shared/parking/${lotId}/zone/${zone.makhuvuc}/select-vehicle`}
                   className="w-full mt-5 inline-flex items-center justify-center gap-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-3 rounded-2xl font-bold hover:from-blue-700 hover:to-indigo-700 transition shadow-lg"
                 >
                   Chọn khu vực này

@@ -40,6 +40,7 @@ const handleLogin = async (e: React.FormEvent) => {
         .eq('manguoidung', data.user.id)
         .single();
 
+console.log('ROLE DB:', userData?.chucnang);
       if (dbError) {
         console.error('Lỗi lấy profile:', dbError);
         toast.error('Không tìm thấy thông tin vai trò người dùng');
@@ -47,8 +48,34 @@ const handleLogin = async (e: React.FormEvent) => {
         return;
       }
 
-      toast.success('Đăng nhập thành công');
-      navigate(`/${userData.chucnang}`);
+     const role = (userData?.chucnang || '').toLowerCase().trim();
+
+if (!role) {
+  toast.error('User không có role');
+  return;
+}
+
+toast.success('Đăng nhập thành công');
+
+switch (role) {
+  case 'admin':
+    window.location.href = '/admin';
+    break;
+  case 'supervisor':
+    window.location.href = '/supervisor';
+    break;
+  case 'support':
+    window.location.href = '/support';
+    break;
+  case 'owner':
+    window.location.href = '/owner';
+    break;
+  case 'provider':
+    window.location.href = '/provider';
+    break;
+  default:
+    toast.error('Role không hợp lệ: ' + role);
+}
 
     } catch (err: any) {
       toast.error(err.message || 'Email hoặc mật khẩu không chính xác');

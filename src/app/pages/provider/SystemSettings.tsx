@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   ArrowLeft, Settings, Bell, Send, Trash2, Plus, Edit 
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { supabase } from '../../utils/supabase.ts';
 
 interface Notification {
   id: string;
@@ -16,7 +17,9 @@ interface Notification {
 }
 
 export const SystemSettings = () => {
+
   const navigate = useNavigate();
+
   const [activeTab, setActiveTab] = useState<'notifications' | 'general'>('notifications');
   const [showNotificationModal, setShowNotificationModal] = useState(false);
 
@@ -64,7 +67,32 @@ export const SystemSettings = () => {
     smsNotifications: false,
     maxDevicesPerLot: 50,
     sessionTimeout: 30,
+    paymentExpireTime: '1h',
   });
+
+    useEffect(() => {
+    const fetchExpireTime = async () => {
+      const { data, error } = await supabase
+        .from('thoigiancodehethan')
+        .select('khoangthoigian')
+        .eq('id', 1)
+        .single();
+
+      if (error) {
+        console.error(error);
+        return;
+      }
+
+      if (data) {
+        setSystemSettings((prev) => ({
+          ...prev,
+          paymentExpireTime: data.khoangthoigian,
+        }));
+      }
+    };
+
+    fetchExpireTime();
+  }, []);
 
   const getNotificationTypeInfo = (type: string) => {
     switch (type) {
@@ -125,9 +153,24 @@ export const SystemSettings = () => {
     toast.success('🗑️ Đã xóa thông báo!');
   };
 
-  const handleSaveSettings = () => {
-    toast.success('✅ Đã lưu cài đặt hệ thống!');
-  };
+ const handleSaveSettings = async () => {
+  const { error } = await supabase
+    .from('thoigiancodehethan')
+    .upsert([
+      {
+        id: 1, // nếu bảng bạn chỉ lưu 1 dòng thì nên fix id
+        khoangthoigian: systemSettings.paymentExpireTime,
+      },
+    ]);
+
+  if (error) {
+    toast.error('❌ Lưu thất bại!');
+    console.error(error);
+    return;
+  }
+
+  toast.success('✅ Đã lưu cài đặt hệ thống!');
+};
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-gray-50 to-zinc-50">
@@ -266,6 +309,26 @@ export const SystemSettings = () => {
 
             <div className="space-y-6">
               <div className="border-2 border-gray-200 rounded-xl p-6">
+                 <h3 className="text-lg font-bold text-gray-900 mb-4">
+    Thời gian hết hạn mã thanh toán
+  </h3>
+
+  <select
+    value={systemSettings.paymentExpireTime}
+    onChange={(e) =>
+      setSystemSettings({
+        ...systemSettings,
+        paymentExpireTime: e.target.value,
+      })
+    }
+    className="w-full px-4 py-3 border-2 border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+  >
+    <option value="1d">1 ngày</option>
+    <option value="1h">1 giờ</option>
+    <option value="5m">5 phút</option>
+    <option value="1m">1 phút</option>
+    <option value="30s">30 giây</option>
+  </select>
                 <h3 className="text-lg font-bold text-gray-900 mb-4">Chế độ bảo trì</h3>
                 <label className="flex items-center gap-3 cursor-pointer">
                   <input

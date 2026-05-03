@@ -16,7 +16,7 @@ import { supabase } from '../../utils/supabase.ts';
 
 interface PricingItem {
   type: string;
-  priceType: 'fixed' | 'hourly' | 'daily';
+  priceType: 'fixed' | 'hourly' | 'daily' | 'minute' | 'second';
   price: string;
   coinPrice: string;
   isVirtualCoin: boolean;
@@ -317,7 +317,7 @@ export const ParkingLotConfig = () => {
             }`}
           >
             <div className="flex justify-between items-center mb-4">
-              <span className="font-bold text-gray-700">Cấu hình loại xe #{displayIndex + 1}</span>
+              <span className="font-bold text-gray-700">Cấu hình loại giá #{displayIndex + 1}</span>
               <label className="flex items-center gap-2 cursor-pointer group">
                 <span className="text-sm font-semibold text-gray-600 group-hover:text-yellow-700">
                   Sử dụng Xu ảo?
@@ -333,7 +333,7 @@ export const ParkingLotConfig = () => {
 
             <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
               <div>
-                <label className="block text-sm mb-2 text-gray-700">Loại xe</label>
+                <label className="block text-sm mb-2 text-gray-700">Loại vị trí</label>
                 <input
                   type="text"
                   value={item.type}
@@ -351,9 +351,12 @@ export const ParkingLotConfig = () => {
                   onChange={(e) => updatePricing(index, 'priceType', e.target.value)}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none disabled:bg-gray-100 disabled:text-gray-500"
                 >
-                  <option value="fixed">Cố định</option>
-                  <option value="hourly">Theo giờ</option>
-                  <option value="daily">Theo ngày</option>
+                    <option value="fixed">Cố định</option>
+  <option value="hourly">Theo giờ</option>
+  <option value="daily">Theo ngày</option>
+  <option value="minute">Theo phút</option>
+  <option value="second">Theo giây</option>
+
                 </select>
               </div>
 
@@ -577,7 +580,8 @@ export const ParkingLotConfig = () => {
                     </div>
                     <p className="text-xs text-gray-500 mt-2 flex items-center gap-1">
                       <ShieldCheck className="w-3 h-3" />
-                      Chỉ nhà cung cấp mới có quyền thay đổi cấu hình xu ảo
+                      Tích vào "Sử dụng Xu ảo?" để bật tính năng đặt chỗ trước (chỉ áp dụng cho loại giá cố định).
+
                     </p>
                   </div>
                 </div>

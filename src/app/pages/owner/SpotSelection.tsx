@@ -175,7 +175,29 @@ const getVehicleIcon = (name: string) => {
 
   return Car;
 };
+const getVehicleLabel = (value: string) => {
+  const text = normalizeText(value);
 
+  if (text === 'car' || text.includes('car') || text.includes('oto') || text.includes('o to')) {
+    return 'Ô tô';
+  }
+
+  if (
+    text === 'motorcycle' ||
+    text.includes('motorcycle') ||
+    text.includes('xe may') ||
+    text.includes('xe máy') ||
+    text.includes('motor')
+  ) {
+    return 'Xe máy';
+  }
+
+  if (text.includes('truck') || text.includes('xe tai')) {
+    return 'Xe tải';
+  }
+
+  return value;
+};
 const getSpotStatusLabel = (status: 0 | 1 | 2) => {
   if (status === 0) return 'Còn trống';
   if (status === 1) return 'Đã đỗ';
@@ -297,11 +319,12 @@ const [selectedPriceId, setSelectedPriceId] = useState<string>('');
               .eq('manguoidung', userId)
               .maybeSingle(),
             supabase
-              .from('banggia')
-              .select('mabanggia, loaixe, loaigia, thanhtien, thanhtoanxuao, mabaido, kieuxe')
-              .eq('mabaido', lotId!)
-              .eq('loaigia', 'fixed')
-              .order('loaixe', { ascending: true }),
+               .from('banggia')
+  .select('mabanggia, loaixe, loaigia, thanhtien, thanhtoanxuao, mabaido, kieuxe')
+  .eq('mabaido', lotId!)
+  .eq('loaigia', 'fixed')
+  .eq('thanhtoanxuao', true)
+  .order('loaixe', { ascending: true }),
             supabase
               .from('vitrido')
               .select('mavitri, tenvitri, trangthai, makhuvuc, mabanggia')
@@ -382,31 +405,28 @@ const [selectedPriceId, setSelectedPriceId] = useState<string>('');
         });
 
         const pricingMap = new Map<string, PricingItem>();
-        priceList.forEach((row) => {
-          const type = String(row.kieuxe ?? row.loaixe ?? '').trim();
-          if (!type) return;
+       priceList.forEach((row) => {
+  const displayType = String(row.loaixe ?? '').trim();
+  const compareType = String(row.kieuxe ?? '').trim();
 
-          const cashOnly = !Boolean(row.thanhtoanxuao);
-          const coinPrice = row.thanhtoanxuao
-            ? coinMap.get(String(row.mabanggia)) ?? null
-            : null;
+  if (!displayType) return;
 
-          pricingMap.set(normalizeText(`${type}-${row.mabanggia}`), {
-            mabanggia: String(row.mabanggia),
-            type,
-            kieuxe: row.kieuxe,
-            cashOnly,
-            price: Number(row.thanhtien ?? 0),
-            coinPrice,
-          });
-        });
+  pricingMap.set(String(row.mabanggia), {
+    mabanggia: String(row.mabanggia),
+    type: displayType,      // hiển thị lên UI
+    kieuxe: compareType,    // dùng để so sánh
+    cashOnly: false,
+    price: Number(row.thanhtien ?? 0),
+    coinPrice: coinMap.get(String(row.mabanggia)) ?? null,
+  });
+});
 
 const allPricingItems = Array.from(pricingMap.values());
 
 const supportedPricingItems = allPricingItems.filter((item) =>
   isCompatibleVehicleType(
     String(vehicleData.maloai ?? ''),
-    String(item.kieuxe ?? item.type)
+    String(item.kieuxe ?? '')
   )
 );
 
@@ -508,12 +528,9 @@ const selectedSpot = useMemo(
   const selectedSpotAvailable = Boolean(selectedSpot && selectedSpot.supported && selectedSpot.status === 0);
 
   const selectedPriceDisplay = useMemo(() => {
-    if (!selectedPrice) return '';
-    if (selectedPrice.cashOnly || selectedPrice.coinPrice == null) {
-      return `${formatMoney(selectedPrice.price)}đ`;
-    }
-    return `${formatMoney(selectedPrice.price)}đ · ${formatMoney(selectedPrice.coinPrice)} xu`;
-  }, [selectedPrice]);
+  if (!selectedPrice) return '';
+  return `${formatMoney(selectedPrice.price)}đ · ${formatMoney(selectedPrice.coinPrice ?? 0)} xu`;
+}, [selectedPrice]);
 
 const availableCount = visibleSpots.filter((s) => s.supported && s.status === 0).length;
 const occupiedCount = visibleSpots.filter((s) => s.status === 1).length;
@@ -776,7 +793,8 @@ const handleConfirm = async () => {
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {pricingItems.map((item) => {
-  const Icon = item.kieuxe === 'motorcycle' ? Bike : Car;
+ const Icon =
+  normalizeText(String(item.kieuxe ?? '')) === 'motorcycle' ? Bike : Car;
   const isCurrent = selectedPrice?.mabanggia === item.mabanggia;
 
   return (
@@ -796,13 +814,11 @@ const handleConfirm = async () => {
                             </div>
                             <div>
                               <div className="font-semibold text-gray-900">
-                                {item.kieuxe || item.type}
-                              </div>
-                              <div className="text-xs text-gray-500 mt-1">
-                                {item.cashOnly
-                                  ? 'Chỉ thanh toán chuyển khoản / tiền mặt'
-                                  : 'Thanh toán chuyển khoản + xu ảo'}
-                              </div>
+  {item.type}
+</div>
+                             <div className="text-xs text-gray-500 mt-1">
+  {getVehicleLabel(item.kieuxe || item.type)} · Có thể chọn thanh toán bằng xu ảo hoặc tiền mặt
+</div>
                             </div>
                           </div>
 

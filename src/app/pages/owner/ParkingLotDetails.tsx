@@ -21,9 +21,10 @@ import {
 } from 'lucide-react';
 import { ImageWithFallback } from '../../components/figma/ImageWithFallback.tsx';
 import { supabase } from '../../utils/supabase.ts';
+import { useAuth } from '../../context/AuthContext.tsx';
+import { toast } from 'sonner';
 
-
-type PriceType = 'fixed' | 'hourly' | 'daily';
+type PriceType = 'fixed' | 'second' | 'minute' | 'hourly' | 'daily';
 type SpotStatusType = 0 | 1 | 2 | number | string;
 
 interface ParkingLotView {
@@ -154,15 +155,19 @@ const formatPriceDisplay = (item: ParkingPricingView) => {
   const basePrice = `${formatMoney(item.price)}đ`;
   const coinPart = item.isVirtualCoin ? ` · ${formatMoney(item.coinPrice)} xu` : '';
 
-  if (item.priceType === 'hourly') return `${basePrice}/giờ${coinPart}`;
-  if (item.priceType === 'daily') return `${basePrice}/ngày${coinPart}`;
-  return `${basePrice}${coinPart}`;
+if (item.priceType === 'second') return `${basePrice}/giây${coinPart}`;
+if (item.priceType === 'minute') return `${basePrice}/phút${coinPart}`;
+if (item.priceType === 'hourly') return `${basePrice}/giờ${coinPart}`;
+if (item.priceType === 'daily') return `${basePrice}/ngày${coinPart}`;
+return `${basePrice}${coinPart}`;
 };
 
 export const ParkingLotDetails = () => {
   const navigate = useNavigate();
   const { id } = useParams();
-
+const { user } = useAuth();
+const role = (user?.role || '').toLowerCase();
+const canManageParking = ['owner', 'support', 'supervisor'].includes(role);
   const [showMapModal, setShowMapModal] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -174,6 +179,67 @@ export const ParkingLotDetails = () => {
 
   const [activeModalZoneId, setActiveModalZoneId] = useState<string | number | null>(null);
   const [activeModalSpotIndex, setActiveModalSpotIndex] = useState(0);
+
+const handleJoinCommunity = async () => {
+  try {
+    if (!user) {
+      toast.error('Bạn chưa đăng nhập!');
+      return;
+    }
+
+    const currentUserId = (user as any)?.manguoidung ?? (user as any)?.id;
+    if (!currentUserId) {
+      toast.error('Không tìm thấy mã người dùng!');
+      return;
+    }
+
+    if (!parkingLot?.communityCode) {
+      toast.error('Bãi đỗ này chưa có mã cộng đồng!');
+      return;
+    }
+
+    const { data: baidoRow, error: baidoError } = await supabase
+      .from('baido')
+      .select('mabaido, mathamgia, tenbaido')
+      .eq('mabaido', parkingLot.id)
+      .maybeSingle();
+
+    if (baidoError) {
+      console.error('BAIDO ERROR:', baidoError);
+      toast.error('Không thể kiểm tra bãi đỗ!');
+      return;
+    }
+
+    if (!baidoRow) {
+      toast.error('Không tìm thấy bãi đỗ!');
+      return;
+    }
+
+    const { error: insertError } = await supabase
+      .from('thanhviencongdong')
+      .upsert(
+        {
+          mabaido: baidoRow.mabaido,
+          manguoidung: currentUserId,
+        },
+        {
+          onConflict: 'mabaido,manguoidung',
+        }
+      );
+
+    if (insertError) {
+      console.error('THANHVIENCONGDONG ERROR:', insertError);
+      toast.error('Không thể thêm bạn vào cộng đồng!');
+      return;
+    }
+
+    toast.success('Đã tham gia cộng đồng!');
+    navigate(`/community/feed?code=${encodeURIComponent(parkingLot.communityCode)}`);
+  } catch (error) {
+    console.error('JOIN COMMUNITY ERROR:', error);
+    toast.error('Có lỗi khi tham gia cộng đồng!');
+  }
+};
 
   const loadParkingLot = async () => {
     try {
@@ -410,7 +476,13 @@ const getSpotVehicleLabel = (spot: ParkingSpotView) => {
 }, [zoneSummaries]);
 
   const sortedPricing = useMemo(() => {
-    const typeOrder: Record<PriceType, number> = { fixed: 0, hourly: 1, daily: 2 };
+    const typeOrder: Record<PriceType, number> = {
+  fixed: 0,
+  second: 1,
+  minute: 2,
+  hourly: 3,
+  daily: 4,
+};
     return [...pricing].sort((a, b) => {
       const diff = typeOrder[a.priceType] - typeOrder[b.priceType];
       if (diff !== 0) return diff;
@@ -566,6 +638,7 @@ const getSpotVehicleLabel = (spot: ParkingSpotView) => {
                   Bản đồ bãi đỗ
                 </h3>
                 <button
+
                   onClick={() => setShowMapModal(true)}
                   className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
                 >
@@ -742,18 +815,20 @@ const getSpotVehicleLabel = (spot: ParkingSpotView) => {
           <div className="lg:col-span-1">
             <div className="bg-white rounded-2xl shadow-lg p-6 sticky top-4">
               <h3 className="text-xl font-bold text-gray-900 mb-4">Đặt chỗ ngay</h3>
-              <button
-                onClick={() => navigate(`/owner/parking/${parkingLot.id}/zones`)}
-                className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-3 rounded-lg hover:from-blue-700 hover:to-indigo-700 transition mb-3 font-semibold"
-              >
-                Chọn bãi đỗ này
-              </button>
-              <button
-                onClick={() => navigate(`/community/feed?code=${encodeURIComponent(parkingLot.communityCode)}`)}
-                className="w-full bg-gradient-to-r from-green-600 to-emerald-600 text-white py-3 rounded-lg hover:from-green-700 hover:to-emerald-700 transition mb-3 font-semibold"
-              >
-                Tham gia cộng đồng
-              </button>
+             {canManageParking && (
+  <button
+    onClick={() => navigate(`/shared/parking/${parkingLot.id}/zones`)}
+    className="w-full bg-gradient-to-r from-yellow-500 to-orange-500 text-white py-3 rounded-lg hover:from-yellow-600 hover:to-orange-600 transition mb-3 font-semibold"
+  >
+    Đặt chỗ trước
+  </button>
+)}
+            <button
+  onClick={handleJoinCommunity}
+  className="w-full bg-gradient-to-r from-pink-500 to-purple-500 text-white py-3 rounded-lg hover:from-pink-600 hover:to-purple-600 transition mb-3 font-semibold"
+>
+  Tham gia cộng đồng
+</button>
               <button
                 onClick={() =>
   navigate(`/community/reviews?lotId=${encodeURIComponent(parkingLot.id)}`)

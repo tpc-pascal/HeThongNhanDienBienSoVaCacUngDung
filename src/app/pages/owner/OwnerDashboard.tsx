@@ -23,9 +23,12 @@ import { toast } from 'sonner';
 interface OwnerDetails {
   xuao: number;
   anhdaidien: string | null;
-  nguoidung: {
-    tennguoidung: string | null;
-  } | null;
+  nguoidung:
+    | {
+        tennguoidung: string | null;
+        chucnang: string | null;
+      }
+    | null;
 }
 
 interface VehicleRow {
@@ -75,6 +78,7 @@ export const OwnerDashboard = () => {
   const [selectedRequest, setSelectedRequest] = useState<ParsedNotification | null>(null);
   const [showNoti, setShowNoti] = useState(false);
   const [vehicles, setVehicles] = useState<VehicleRow[]>([]);
+  const [userRole, setUserRole] = useState<string>('owner');
 
   const fetchOwnerData = async () => {
     try {
@@ -98,6 +102,7 @@ export const OwnerDashboard = () => {
           manguoidung: user.id,
           tennguoidung: user.email,
           email: user.email,
+          chucnang: 'owner',
         });
       }
 
@@ -115,9 +120,16 @@ export const OwnerDashboard = () => {
         });
       }
 
-      const { data, error } = await supabase
-        .from('ctchuxe')
-        .select('xuao, anhdaidien, nguoidung ( tennguoidung )')
+     const { data, error } = await supabase
+  .from('ctchuxe')
+  .select(`
+    xuao,
+    anhdaidien,
+    nguoidung (
+      tennguoidung,
+      chucnang
+    )
+  `)
         .eq('manguoidung', user.id)
         .single();
 
@@ -125,6 +137,7 @@ export const OwnerDashboard = () => {
 
       setOwnerDetails(data as unknown as OwnerDetails);
       setVirtualCoins(data?.xuao || 0);
+      setUserRole((data?.nguoidung as any)?.chucnang || 'owner');
     } catch (error) {
       console.error(error);
     } finally {
@@ -394,7 +407,7 @@ export const OwnerDashboard = () => {
         title: 'Đăng ký đỗ xe',
         desc: 'Đặt chỗ và thanh toán trước',
         icon: MapPin,
-        onClick: () => navigate('/owner/parking-lots'),
+        onClick: () => navigate('/shared/parking-lots'),
         className: 'bg-gradient-to-br from-emerald-500 to-teal-600',
         iconWrap: 'bg-white/20',
       },
@@ -423,7 +436,7 @@ export const OwnerDashboard = () => {
         iconWrap: 'bg-white/20',
       },
     ],
-    [navigate]
+    [navigate, userRole]
   );
 
   return (

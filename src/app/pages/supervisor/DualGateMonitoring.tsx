@@ -1,12 +1,24 @@
-import { useState, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  ArrowLeft, Camera, Check, X, DollarSign, MapPin, Upload,
-  Clock, AlertCircle, Video, Coins, BadgeCheck, ArrowLeftRight,
-  Users, RefreshCw
+  ArrowLeft,
+  ArrowLeftRight,
+  BadgeCheck,
+  Camera,
+  Check,
+  Clock,
+  DollarSign,
+  MapPin,
+  Upload,
+  Users,
+  X,
+  AlertCircle,
+  Video,
+  Coins,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { processLicensePlate } from '../../service/lprService';
+import { processLicensePlate } from '../../service/lprService.ts';
+import { supabase } from '../../utils/supabase.ts';
 
 interface ScannedVehicle {
   plateNumber: string;
@@ -20,352 +32,1073 @@ interface ScannedVehicle {
   }>;
 }
 
-interface GateData {
-  scannedData: ScannedVehicle | null;
-  selectedSpot: string;
-  selectedOwner: string;
-  paymentMethod: 'cash' | 'online' | 'coins';
-  parkingDuration: { hours: number; minutes: number };
-  scanning: boolean;
+interface ExitActiveRow {
+  maxevao: string;
+  bienso: string;
+  thoigianvao: string;
+  mavitri: string;
+  anhbiensovao?: string | null;
+  anhnguoivao?: string | null;
+  ketthuc: boolean;
 }
 
-export const DualGateMonitoring = () => {
-  const navigate = useNavigate();
+interface ExitFeeViewRow {
+  id: string;
+  maxevao: string;
+  bienso: string;
+  loaigia: 'hourly' | 'daily' | 'minute' | 'second' | 'fixed' | 'reservation' | string;
+  ketthuc: boolean;
+  thoigianvao: string;
+  tien_hien_tai_hien_thi: number | string;
+  loaixe?: string | null;
+  kieuxe?: string | null;
+}
 
-  // Camera swap state
-  const [cameraSwapped, setCameraSwapped] = useState(false);
+interface TimedFeeRow {
+  id: string;
+  maxevao: string;
+  tien_hien_tai_hien_thi: number | string | null;
+  ketthuc: boolean | null;
+  thoigianvao?: string | null;
+}
 
-  // Separate refs for each gate
-  const entryPlateRef = useRef<HTMLInputElement>(null);
-  const entryDriverRef = useRef<HTMLInputElement>(null);
-  const exitPlateRef = useRef<HTMLInputElement>(null);
-  const exitDriverRef = useRef<HTMLInputElement>(null);
+interface PlateCandidate {
+  row: ExitActiveRow;
+  score: number;
+}
 
-  // Entry gate state
-  const [entryGate, setEntryGate] = useState<GateData>({
-    scannedData: null,
-    selectedSpot: '',
-    selectedOwner: '',
-    paymentMethod: 'cash',
-    parkingDuration: { hours: 3, minutes: 30 },
-    scanning: false,
+interface ParkingSpotView {
+  mavitri: string;
+  tenvitri: string;
+  makhuvuc: string;
+  tenkhuvuc: string;
+  mabanggia: string | null;
+  loaixe: string;
+  loaigia: 'fixed' | 'hourly' | 'daily' | 'minute' | 'second' | string | null;
+  kieuxe: 'car' | 'motorcycle' | string | null;
+  thanhtien: number | string | null;
+  trangthai: number | string | null;
+}
+
+interface ExitPaymentContext {
+  source: 'reservation' | 'fixed' | 'timed';
+  tongtien: number;
+  loaigia: string;
+}
+
+interface PreBookingRow {
+  mabang: string;
+  manguoidung: string | null;
+  mabaido: string | null;
+  makhuvuc: string | null;
+  mavitri: string | null;
+  loaithanhtoan: string | null;
+  thanhtien: number | string | null;
+  ngayhethan: string | null;
+  trangthai: string | null;
+  maphuongtien: string | null;
+  mathanhtoan: string | null;
+}
+
+type VehicleKind = 'car' | 'motorcycle' | 'other';
+type GateKind = 'entry' | 'exit';
+type PaymentMethod = 'cash' | 'online' | 'coins';
+
+type StaffState = {
+  currentUserId: string;
+  currentLotId: string;
+  loadingData: boolean;
+  parkingSpots: ParkingSpotView[];
+  reloadData: () => Promise<void>;
+};
+
+const normalizeStatus = (value: unknown) => String(value ?? '').trim().toLowerCase();
+
+
+const isValidVietnamPlate = (plate: string) => {
+  const p = normalizePlate(plate);
+
+  // Format phổ biến:
+  // 29A12345 / 29A123.45 / 51F-12345 / 59X1-123.45
+  const regex = /^[0-9]{2}[A-Z][0-9A-Z]?[0-9]{4,5}$/;
+
+  return regex.test(p);
+};
+
+const normalizePlate = (value: unknown) =>
+  String(value ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/[\s.-]/g, '');
+
+const getSpotStatus = (value: unknown): 0 | 1 | 2 => {
+  const n = Number(value);
+  return n === 0 || n === 1 || n === 2 ? n : 0;
+};
+
+const getSpotStyle = (status: unknown) => {
+  const s = getSpotStatus(status);
+  if (s === 0) return 'border-green-600 bg-green-50';
+  if (s === 2) return 'border-yellow-500 bg-yellow-50';
+  if (s === 1) return 'border-red-600 bg-red-50';
+  return 'border-gray-300 bg-white';
+};
+
+const getPriceTypeLabel = (type: string) => {
+  switch (type) {
+    case 'fixed':
+      return 'Cố định';
+    case 'hourly':
+      return 'Theo giờ';
+    case 'daily':
+      return 'Theo ngày';
+    case 'minute':
+      return 'Theo phút';
+    case 'second':
+      return 'Theo giây';
+    default:
+      return type;
+  }
+};
+
+const getVehicleKindLabel = (kieuxe: string | null | undefined) => {
+  if (kieuxe === 'car') return 'Ô tô';
+  if (kieuxe === 'motorcycle' || kieuxe === 'motocycle') return 'Xe máy';
+  return 'Khác';
+};
+
+const createEntryReset = () => ({
+  scanning: false,
+  scannedData: null as ScannedVehicle | null,
+  paymentMethod: 'cash' as PaymentMethod,
+  selectedOwner: '',
+  savingEntry: false,
+  plateFile: null as File | null,
+  driverFile: null as File | null,
+  selectedSpot: '',
+  selectedZone: 'all',
+  onlyReservedSpots: false,
+  selectedVehicleKinds: [] as string[],
+  selectedPriceTypes: [] as string[],
+  reservationCode: '',
+  selectedSpotStatus: null as number | null,
+});
+
+const createExitReset = () => ({
+  scanning: false,
+  scannedData: null as ScannedVehicle | null,
+  paymentMethod: 'cash' as PaymentMethod,
+  savingEntry: false,
+  plateFile: null as File | null,
+  driverFile: null as File | null,
+  exitExactRow: null as ExitActiveRow | null,
+  exitFeeRow: null as ExitFeeViewRow | null,
+  exitCandidates: [] as PlateCandidate[],
+  exitLoading: false,
+  exitSaving: false,
+  exitReservationRow: null as PreBookingRow | null,
+  exitPaymentContext: null as ExitPaymentContext | null,
+  paymentConfirmed: false,
+});
+
+const uploadVehicleImage = async (file: File, folder: string, currentUserId: string) => {
+  if (!currentUserId) throw new Error('Chưa có mã người dùng để upload');
+
+  const ext = file.name.split('.').pop() || 'jpg';
+  const filePath = `${folder}/${currentUserId}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+
+  const { error: uploadError } = await supabase.storage.from('PhuongTien').upload(filePath, file, {
+    upsert: true,
+    contentType: file.type,
   });
 
-  // Exit gate state
-  const [exitGate, setExitGate] = useState<GateData>({
-    scannedData: null,
-    selectedSpot: '',
-    selectedOwner: '',
-    paymentMethod: 'cash',
-    parkingDuration: { hours: 3, minutes: 30 },
-    scanning: false,
-  });
+  if (uploadError) throw uploadError;
 
-  const availableSpots = [
-    { id: 'A001', zone: 'Sân A', status: 'available' },
-    { id: 'A002', zone: 'Sân A', status: 'available' },
-    { id: 'A015', zone: 'Sân A', status: 'available' },
-    { id: 'B003', zone: 'Sân B', status: 'available' },
-    { id: 'B008', zone: 'Sân B', status: 'available' },
-    { id: 'B012', zone: 'Sân B', status: 'available' },
-  ];
+  const { data } = supabase.storage.from('PhuongTien').getPublicUrl(filePath);
+  return {
+    filePath,
+    publicUrl: data.publicUrl,
+  };
+};
 
-  // Handle Entry Gate - Plate Image
-  const handleEntryPlateImage = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-        setEntryGate((prev) => ({ ...prev, scanning: true }));
-        try {
-          // Gọi LPR API để lấy biển số thực tế
-          const plateNumber = await processLicensePlate(file);
-          const isDuplicate = Math.random() > 0.7;
-          
-          setEntryGate((prev) => ({
-            ...prev,
-            scanning: false,
-            scannedData: {
-              plateNumber: plateNumber,
-              plateImage: reader.result as string,
-              driverImage: '',
-              possibleOwners: isDuplicate
-                ? [
-                    {
-                      id: '1',
-                      name: 'Nguyễn Văn A',
-                      phone: '0901234567',
-                      lastUsed: new Date('2026-03-28'),
-                    },
-                    {
-                      id: '2',
-                      name: 'Trần Thị B',
-                      phone: '0902345678',
-                      lastUsed: new Date('2026-03-25'),
-                    },
-                  ]
-                : undefined,
-            },
-          }));
-          toast.success(
-            isDuplicate
-              ? '⚠️ [Cổng VÀO] Phát hiện trùng biển số!'
-              : '✓ [Cổng VÀO] Đã nhận diện biển số!'
-          );
-        } catch (error) {
-          setEntryGate((prev) => ({ ...prev, scanning: false }));
-          toast.error(`❌ [Cổng VÀO] Lỗi nhận diện: ${error instanceof Error ? error.message : 'Lỗi không xác định'}`);
-        }
-      };
-      reader.readAsDataURL(file);
+const levenshtein = (a: string, b: string) => {
+  const m = a.length;
+  const n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
     }
+  }
+
+  return dp[m][n];
+};
+
+const plateSimilarity = (a: string, b: string) => {
+  const x = normalizePlate(a);
+  const y = normalizePlate(b);
+  if (!x || !y) return 0;
+  const dist = levenshtein(x, y);
+  return 1 - dist / Math.max(x.length, y.length);
+};
+
+const GatePanel = ({
+  kind,
+  currentUserId,
+  currentLotId,
+  parkingSpots,
+  reloadData,
+}: {
+  kind: GateKind;
+  currentUserId: string;
+  currentLotId: string;
+  parkingSpots: ParkingSpotView[];
+  reloadData: () => Promise<void>;
+}) => {
+  const plateInputRef = useRef<HTMLInputElement>(null);
+  const driverInputRef = useRef<HTMLInputElement>(null);
+
+  const [scanning, setScanning] = useState(false);
+  const [scannedData, setScannedData] = useState<ScannedVehicle | null>(null);
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
+  const [selectedOwner, setSelectedOwner] = useState('');
+
+  const [savingEntry, setSavingEntry] = useState(false);
+  const [plateFile, setPlateFile] = useState<File | null>(null);
+  const [driverFile, setDriverFile] = useState<File | null>(null);
+  const [selectedSpot, setSelectedSpot] = useState('');
+  const [selectedZone, setSelectedZone] = useState('all');
+  const [onlyReservedSpots, setOnlyReservedSpots] = useState(false);
+  const [selectedVehicleKinds, setSelectedVehicleKinds] = useState<string[]>([]);
+  const [selectedPriceTypes, setSelectedPriceTypes] = useState<string[]>([]);
+  const [reservationCode, setReservationCode] = useState('');
+  const [selectedSpotStatus, setSelectedSpotStatus] = useState<number | null>(null);
+
+  const [exitExactRow, setExitExactRow] = useState<ExitActiveRow | null>(null);
+  const [exitFeeRow, setExitFeeRow] = useState<ExitFeeViewRow | null>(null);
+  const [exitCandidates, setExitCandidates] = useState<PlateCandidate[]>([]);
+  const [exitLoading, setExitLoading] = useState(false);
+  const [exitSaving, setExitSaving] = useState(false);
+  const [exitReservationRow, setExitReservationRow] = useState<PreBookingRow | null>(null);
+  const [exitPaymentContext, setExitPaymentContext] = useState<ExitPaymentContext | null>(null);
+  const [paymentConfirmed, setPaymentConfirmed] = useState(false);
+
+  const isEntry = kind === 'entry';
+  const isExit = kind === 'exit';
+
+  const zoneOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    parkingSpots.forEach((spot) => {
+      if (spot.makhuvuc && !map.has(spot.makhuvuc)) {
+        map.set(spot.makhuvuc, spot.tenkhuvuc);
+      }
+    });
+    return Array.from(map.entries()).map(([makhuvuc, tenkhuvuc]) => ({ makhuvuc, tenkhuvuc }));
+  }, [parkingSpots]);
+
+  const vehicleKindOptions = useMemo(() => {
+    const set = new Set<string>();
+    parkingSpots.forEach((spot) => {
+      if (spot.loaixe) set.add(spot.loaixe);
+    });
+    return Array.from(set);
+  }, [parkingSpots]);
+
+  const priceTypeOptions = useMemo(() => {
+    const set = new Set<string>();
+    parkingSpots.forEach((spot) => {
+      if (spot.loaigia) set.add(String(spot.loaigia));
+    });
+    const order = ['fixed', 'hourly', 'daily', 'minute', 'second'];
+    return Array.from(set).sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  }, [parkingSpots]);
+
+  const filteredSpots = useMemo(() => {
+    return parkingSpots.filter((spot) => {
+      const matchZone = selectedZone === 'all' || spot.makhuvuc === selectedZone;
+      const matchVehicle = selectedVehicleKinds.length === 0 || selectedVehicleKinds.includes(spot.loaixe);
+      const matchReserved = !onlyReservedSpots || getSpotStatus(spot.trangthai) === 2;
+      const matchPriceType = selectedPriceTypes.length === 0 || selectedPriceTypes.includes(String(spot.loaigia));
+      return matchZone && matchVehicle && matchReserved && matchPriceType;
+    });
+  }, [parkingSpots, selectedZone, selectedVehicleKinds, onlyReservedSpots, selectedPriceTypes]);
+
+  const toggleVehicleKind = (kindName: string) => {
+    setSelectedVehicleKinds((prev) =>
+      prev.includes(kindName) ? prev.filter((x) => x !== kindName) : [...prev, kindName]
+    );
   };
 
-  // Handle Entry Gate - Driver Image
-  const handleEntryDriverImage = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        if (entryGate.scannedData) {
-          setEntryGate((prev) => ({
-            ...prev,
-            scannedData: prev.scannedData
-              ? { ...prev.scannedData, driverImage: reader.result as string }
-              : null,
-          }));
-          toast.success('✓ [Cổng VÀO] Đã chụp ảnh người lái!');
-        }
-      };
-      reader.readAsDataURL(file);
-    }
+  const togglePriceType = (type: string) => {
+    setSelectedPriceTypes((prev) =>
+      prev.includes(type) ? prev.filter((x) => x !== type) : [...prev, type]
+    );
   };
 
-  // Handle Exit Gate - Plate Image
-  const handleExitPlateImage = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-        setExitGate((prev) => ({ ...prev, scanning: true }));
-        try {
-          // Gọi LPR API để lấy biển số thực tế
-          const plateNumber = await processLicensePlate(file);
-          
-          setExitGate((prev) => ({
-            ...prev,
-            scanning: false,
-            scannedData: {
-              plateNumber: plateNumber,
-              plateImage: reader.result as string,
-              driverImage: '',
-            },
-          }));
-          toast.success('✓ [Cổng RA] Đã nhận diện biển số!');
-        } catch (error) {
-          setExitGate((prev) => ({ ...prev, scanning: false }));
-          toast.error(`❌ [Cổng RA] Lỗi nhận diện: ${error instanceof Error ? error.message : 'Lỗi không xác định'}`);
-        }
-      };
-      reader.readAsDataURL(file);
-    }
+  const saveConfirmedPlate = async (payload: { maxevao: string; mavitri: string; bienso: string }) => {
+    const { error } = await supabase.from('xacnhanbiensodung').insert({
+      maxevao: payload.maxevao,
+      mavitri: payload.mavitri,
+      bienso: normalizePlate(payload.bienso),
+      created_at: new Date().toISOString(),
+    });
+
+    if (error) console.error('INSERT XACNHANBIENSODUNG ERROR:', error);
   };
 
-  // Handle Exit Gate - Driver Image
-  const handleExitDriverImage = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        if (exitGate.scannedData) {
-          setExitGate((prev) => ({
-            ...prev,
-            scannedData: prev.scannedData
-              ? { ...prev.scannedData, driverImage: reader.result as string }
-              : null,
-          }));
-          toast.success('✓ [Cổng RA] Đã chụp ảnh người lái!');
-        }
-      };
-      reader.readAsDataURL(file);
-    }
-  };
+  const loadExitPaymentContext = async (entry: ExitActiveRow) => {
+    setExitReservationRow(null);
+    setExitPaymentContext(null);
+    setExitFeeRow(null);
+    setPaymentConfirmed(false);
 
-  // Confirm Entry
-  const handleConfirmEntry = () => {
-    if (!entryGate.scannedData) {
-      toast.error('❌ [Cổng VÀO] Vui lòng quét biển số xe');
-      return;
-    }
-    if (!entryGate.scannedData.driverImage) {
-      toast.error('❌ [Cổng VÀO] Vui lòng chụp ảnh người lái');
-      return;
-    }
-    if (!entryGate.selectedSpot) {
-      toast.error('❌ [Cổng VÀO] Vui lòng chọn vị trí đỗ');
-      return;
-    }
-    if (entryGate.scannedData.possibleOwners && !entryGate.selectedOwner) {
-      toast.error('❌ [Cổng VÀO] Vui lòng chọn Người dùng đúng');
+    const spot = parkingSpots.find((x) => x.mavitri === entry.mavitri);
+    if (!spot) {
+      toast.error('Không tìm thấy vị trí của xe');
       return;
     }
 
+    if (currentLotId) {
+      const { data: bookingRows, error: bookingError } = await supabase
+        .from('bangdatchotruoc')
+        .select('mabang, manguoidung, mabaido, makhuvuc, mavitri, loaithanhtoan, thanhtien, ngayhethan, trangthai, maphuongtien, mathanhtoan')
+        .eq('mabaido', currentLotId)
+        .eq('mavitri', entry.mavitri)
+        .eq('trangthai', 'đã nhận chỗ');
+
+      if (bookingError) {
+        console.error('LOAD BANGDATCHOTRUOC EXIT ERROR:', bookingError);
+      } else {
+        const matches = (bookingRows ?? []) as PreBookingRow[];
+
+        for (const booking of matches) {
+          if (!booking.maphuongtien) continue;
+
+          const { data: vehicleRow, error: vehicleError } = await supabase
+            .from('phuongtien')
+            .select('id, bienso')
+            .eq('id', booking.maphuongtien)
+            .maybeSingle();
+
+          if (vehicleError) {
+            console.error('LOAD PHUONGTIEN EXIT ERROR:', vehicleError);
+            continue;
+          }
+
+          if (normalizePlate(vehicleRow?.bienso) === normalizePlate(entry.bienso)) {
+            const amount = Number(booking.thanhtien ?? 0);
+
+            setExitReservationRow(booking);
+            setExitPaymentContext({ source: 'reservation', tongtien: amount, loaigia: 'reservation' });
+            setExitFeeRow({
+              id: booking.mabang,
+              maxevao: entry.maxevao,
+              bienso: entry.bienso,
+              loaigia: 'reservation',
+              ketthuc: true,
+              thoigianvao: entry.thoigianvao,
+              tien_hien_tai_hien_thi: amount,
+              loaixe: spot.loaixe,
+              kieuxe: spot.kieuxe,
+            });
+            return;
+          }
+        }
+      }
+    }
+
+    if (spot.mabanggia) {
+      const { data: priceRow, error: priceError } = await supabase
+        .from('banggia')
+        .select('mabanggia, loaixe, loaigia, kieuxe, thanhtien, mabaido')
+        .eq('mabanggia', spot.mabanggia)
+        .maybeSingle();
+
+      if (priceError) {
+        console.error('LOAD BANGGIA ERROR:', priceError);
+        toast.error('Lỗi khi lấy bảng giá');
+        return;
+      }
+
+      if (priceRow?.loaigia === 'fixed') {
+        const amount = Number(priceRow.thanhtien ?? 0);
+
+        setExitFeeRow({
+          id: entry.maxevao,
+          maxevao: entry.maxevao,
+          bienso: entry.bienso,
+          loaigia: 'fixed',
+          ketthuc: true,
+          thoigianvao: entry.thoigianvao,
+          tien_hien_tai_hien_thi: amount,
+          loaixe: priceRow.loaixe,
+          kieuxe: priceRow.kieuxe,
+        });
+
+        setExitPaymentContext({ source: 'fixed', tongtien: amount, loaigia: 'fixed' });
+        return;
+      }
+    }
+
+    const { data: timedRow, error: timedError } = await supabase
+      .from('view_thanhtiendatcho')
+      .select('id, maxevao, tien_hien_tai_hien_thi, ketthuc, thoigianvao')
+      .eq('maxevao', entry.maxevao)
+      .maybeSingle();
+
+    if (timedError) {
+      console.error('LOAD VIEW_THANHTIENDATCHO ERROR:', timedError);
+      toast.error('Không tải được thông tin tính giờ');
+      return;
+    }
+
+    if (!timedRow) {
+      toast.error('Chưa có dữ liệu tính giờ');
+      return;
+    }
+
+    const amount = Number((timedRow as TimedFeeRow).tien_hien_tai_hien_thi ?? 0);
+
+    setExitFeeRow({
+      id: entry.maxevao,
+      maxevao: entry.maxevao,
+      bienso: entry.bienso,
+      loaigia: spot.loaigia || 'hourly',
+      ketthuc: Boolean(timedRow.ketthuc),
+      thoigianvao: entry.thoigianvao,
+      tien_hien_tai_hien_thi: amount,
+      loaixe: spot.loaixe,
+      kieuxe: spot.kieuxe,
+    });
+
+    setExitPaymentContext({ source: 'timed', tongtien: amount, loaigia: String(spot.loaigia ?? 'hourly') });
+  };
+
+  const loadExitMatch = async (plateNumber: string) => {
+    const normalized = normalizePlate(plateNumber);
+    const spotIds = parkingSpots.map((x) => x.mavitri);
+
+    if (spotIds.length === 0) {
+      toast.error('Chưa có danh sách vị trí của bãi');
+      return;
+    }
+
+    setExitLoading(true);
+    setExitExactRow(null);
+    setExitFeeRow(null);
+    setExitCandidates([]);
+    setExitReservationRow(null);
+    setExitPaymentContext(null);
+    setPaymentConfirmed(false);
+
+    try {
+      const { data: activeRows, error } = await supabase
+        .from('lichsuxevao')
+        .select('maxevao, bienso, thoigianvao, mavitri, anhbiensovao, anhnguoivao, ketthuc')
+        .eq('ketthuc', false)
+        .in('mavitri', spotIds);
+
+      if (error) {
+        console.error('LOAD EXIT ACTIVE ROWS ERROR:', error);
+        toast.error('Lỗi khi tìm xe trong bãi');
+        return;
+      }
+
+      const rows = (activeRows ?? []) as ExitActiveRow[];
+      const exactMatches = rows.filter((r) => normalizePlate(r.bienso) === normalized);
+
+      if (exactMatches.length === 1) {
+        const exact = exactMatches[0];
+        setExitExactRow(exact);
+        await saveConfirmedPlate({ maxevao: exact.maxevao, mavitri: exact.mavitri, bienso: exact.bienso });
+        toast.success(`Biển số đúng: ${exact.bienso}`);
+        await loadExitPaymentContext(exact);
+        return;
+      }
+
+      if (exactMatches.length > 1) {
+        toast.error('Phát hiện nhiều bản ghi trùng biển số. Cần kiểm tra thủ công.');
+        return;
+      }
+
+      const candidates = rows
+        .map((r) => ({ row: r, score: plateSimilarity(normalized, r.bienso) }))
+        .filter((x) => x.score >= 0.8 && x.score < 1)
+        .sort((a, b) => b.score - a.score);
+
+      if (candidates.length > 0) {
+        setExitCandidates(candidates);
+        toast.info('Chưa khớp 100%. Hãy chọn biển gần đúng bên dưới.');
+        return;
+      }
+
+      setExitCandidates([]);
+    } finally {
+      setExitLoading(false);
+    }
+  };
+
+  const handlePlateImageSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setPlateFile(file);
+    const reader = new FileReader();
+
+    reader.onloadend = async () => {
+      const previewImage = reader.result as string;
+      setScanning(true);
+      try {
+        const plateNumber = await processLicensePlate(file);
+        setScannedData((prev) => ({
+          plateNumber,
+          plateImage: previewImage,
+          driverImage: prev?.driverImage || '',
+          possibleOwners: prev?.possibleOwners,
+        }));
+        toast.success('Đã nhận diện biển số thành công!');
+
+        if (isExit) {
+          await loadExitMatch(plateNumber);
+        }
+      } catch (error) {
+        console.error('Lỗi nhận diện biển số:', error);
+        toast.error('Lỗi khi gọi API nhận diện biển số. Vui lòng thử lại.');
+      } finally {
+        setScanning(false);
+      }
+    };
+
+    reader.readAsDataURL(file);
+  };
+
+  const handleDriverImageSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setDriverFile(file);
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      if (scannedData) {
+        setScannedData({ ...scannedData, driverImage: reader.result as string });
+        toast.success('Đã chụp ảnh người lái!');
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleExitPlateKeyDown = async (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+
+    if (!scannedData?.plateNumber.trim()) {
+      toast.error('Nhập biển số trước');
+      return;
+    }
+
+    await loadExitMatch(scannedData.plateNumber);
+  };
+
+  const handleConfirmEntry = async () => {
+    if (!scannedData) {
+      toast.error('Vui lòng quét biển số xe');
+      return;
+    }
+
+    if (!isValidVietnamPlate(scannedData.plateNumber)) {
+    toast.error('Biển số không đúng định dạng');
+    return;
+  }
+
+    if (!plateFile) {
+      toast.error('Vui lòng chọn ảnh biển số');
+      return;
+    }
+
+    if (!driverFile) {
+      toast.error('Vui lòng chụp ảnh người lái');
+      return;
+    }
+
+    if (!selectedSpot) {
+      toast.error('Vui lòng chọn vị trí đỗ');
+      return;
+    }
+
+    const spot = parkingSpots.find((item) => item.mavitri === selectedSpot);
+    if (!spot) {
+      toast.error('Không tìm thấy vị trí đã chọn');
+      return;
+    }
+
+    const spotStatus = getSpotStatus(spot.trangthai);
+    const code = reservationCode.trim().toUpperCase();
+
+    if (spotStatus === 1) {
+      toast.error('Vị trí này đã có xe');
+      return;
+    }
+
+    if (spotStatus === 2 && !/^[A-Z0-9]{8}$/.test(code)) {
+      toast.error('Mã phải gồm 8 ký tự (chữ in hoa + số)');
+      return;
+    }
+
+    let matchedBooking: PreBookingRow | null = null;
+
+    if (spotStatus === 2) {
+      if (!currentLotId) {
+        toast.error('Chưa xác định được bãi đỗ');
+        return;
+      }
+
+      const { data: bookingRow, error: bookingError } = await supabase
+        .from('bangdatchotruoc')
+        .select('mabang, manguoidung, mabaido, makhuvuc, mavitri, loaithanhtoan, thanhtien, ngayhethan, trangthai, maphuongtien, mathanhtoan')
+        .eq('mathanhtoan', code)
+        .eq('mabaido', currentLotId)
+        .maybeSingle();
+
+      if (bookingError) {
+        console.error('LOAD BANGDATCHOTRUOC ERROR:', bookingError);
+        toast.error('Lỗi khi kiểm tra mã đặt chỗ');
+        return;
+      }
+
+      if (!bookingRow) {
+        toast.error('Không tìm thấy mã đặt chỗ');
+        return;
+      }
+
+      const booking = bookingRow as PreBookingRow;
+      const bookingStatus = normalizeStatus(booking.trangthai);
+
+      if (booking.ngayhethan && new Date(booking.ngayhethan) < new Date()) {
+        toast.error('Mã này đã hết hạn');
+        return;
+      }
+
+      if (bookingStatus === 'hết hạn') {
+        toast.error('Mã này đã hết hạn');
+        return;
+      }
+
+      if (bookingStatus === 'hoàn thành' || bookingStatus === 'đã nhận chỗ') {
+        toast.error('Mã đã được sử dụng');
+        return;
+      }
+
+      if (bookingStatus !== 'đã đặt chỗ') {
+        toast.error('Mã không ở trạng thái đã đặt chỗ');
+        return;
+      }
+
+      if (booking.mavitri !== selectedSpot) {
+        toast.error('Mã này không khớp với vị trí đang chọn');
+        return;
+      }
+
+      if (!booking.maphuongtien) {
+        toast.error('Mã đặt chỗ chưa gắn phương tiện');
+        return;
+      }
+
+      const { data: vehicleRow, error: vehicleError } = await supabase
+        .from('phuongtien')
+        .select('id, bienso')
+        .eq('id', booking.maphuongtien)
+        .maybeSingle();
+
+      if (vehicleError) {
+        console.error('LOAD PHUONGTIEN ERROR:', vehicleError);
+        toast.error('Lỗi khi kiểm tra phương tiện đặt chỗ');
+        return;
+      }
+
+      if (!vehicleRow?.bienso) {
+        toast.error('Không tìm thấy biển số của phương tiện đặt chỗ');
+        return;
+      }
+
+      const scannedPlate = normalizePlate(scannedData.plateNumber);
+      const bookedPlate = normalizePlate(vehicleRow.bienso);
+
+      if (scannedPlate !== bookedPlate) {
+        toast.error('Biển số không khớp với phương tiện đã đặt chỗ');
+        return;
+      }
+
+      matchedBooking = booking;
+    }
+
+    setSavingEntry(true);
+    try {
+      const [plateUpload, driverUpload] = await Promise.all([
+        uploadVehicleImage(plateFile, 'biensovao', currentUserId),
+        uploadVehicleImage(driverFile, 'nguoivao', currentUserId),
+      ]);
+
+      const { error: insertError } = await supabase.from('lichsuxevao').insert({
+        bienso: scannedData.plateNumber.trim().toUpperCase(),
+        thoigianvao: new Date().toISOString(),
+        mavitri: selectedSpot,
+        anhbiensovao: plateUpload.publicUrl,
+        anhnguoivao: driverUpload.publicUrl,
+      });
+
+      if (insertError) {
+        console.error('INSERT LICHSUXEVAO ERROR:', insertError);
+        toast.error('Không thể lưu lịch sử xe vào');
+        return;
+      }
+
+      const { error: updateSpotError } = await supabase
+        .from('vitrido')
+        .update({ trangthai: 1 })
+        .eq('mavitri', selectedSpot)
+        .eq('trangthai', spotStatus === 2 ? 2 : 0);
+
+      if (updateSpotError) {
+        console.error('UPDATE VITRIDO ERROR:', updateSpotError);
+        toast.error('Đã lưu xe vào nhưng không cập nhật được trạng thái vị trí');
+        return;
+      }
+
+      if (matchedBooking) {
+        const { error: updateBookingError } = await supabase
+          .from('bangdatchotruoc')
+          .update({ trangthai: 'đã nhận chỗ' })
+          .eq('mabang', matchedBooking.mabang);
+
+        if (updateBookingError) {
+          console.error('UPDATE BANGDATCHOTRUOC ERROR:', updateBookingError);
+          toast.error('Đã lưu xe vào nhưng không cập nhật được trạng thái đặt chỗ');
+          return;
+        }
+
+        if (matchedBooking.manguoidung && matchedBooking.mabaido) {
+          const { error: serviceError } = await supabase
+            .from('sudungdichvu')
+            .upsert(
+              {
+                manguoidung: matchedBooking.manguoidung,
+                mabaido: matchedBooking.mabaido,
+                dasudungdichvu: true,
+                created_at: new Date().toISOString(),
+              },
+              { onConflict: 'manguoidung,mabaido' }
+            );
+
+          if (serviceError) {
+            console.error('UPSERT SUDUNGDICHVU ERROR:', serviceError);
+            toast.error('Đã lưu xe vào nhưng không cập nhật được bảng sử dụng dịch vụ');
+            return;
+          }
+        }
+      }
+
+      toast.success(`✅ Đã cho xe ${scannedData.plateNumber} vào bãi`);
+
+      setScannedData(null);
+      setSelectedSpot('');
+      setSelectedSpotStatus(null);
+      setSelectedOwner('');
+      setPlateFile(null);
+      setDriverFile(null);
+      setReservationCode('');
+      await reloadData();
+    } catch (error) {
+      console.error('CONFIRM ENTRY ERROR:', error);
+      toast.error('Lỗi khi lưu xe vào bãi');
+    } finally {
+      setSavingEntry(false);
+    }
+  };
+
+  const handleConfirmExitPayment = async () => {
+    if (!scannedData) {
+      toast.error('Vui lòng quét biển số xe');
+      return;
+    }
+
+    if (!plateFile) {
+      toast.error('Vui lòng chọn ảnh biển số');
+      return;
+    }
+
+    if (!driverFile) {
+      toast.error('Vui lòng chọn ảnh người lái');
+      return;
+    }
+
+    if (!exitExactRow) {
+      toast.error('Chưa xác định được xe trong bãi');
+      return;
+    }
+
+    if (exitPaymentContext?.source === 'timed' && !exitFeeRow?.ketthuc) {
+      toast.error('Hãy bấm Kết thúc tính giờ trước');
+      return;
+    }
+
+    setPaymentConfirmed(true);
     toast.success(
-      `✅ Cho xe ${entryGate.scannedData.plateNumber} VÀO bãi - Vị trí ${entryGate.selectedSpot}`,
-      { duration: 3000 }
-    );
-
-    // Reset entry gate
-    setEntryGate({
-      scannedData: null,
-      selectedSpot: '',
-      selectedOwner: '',
-      paymentMethod: 'cash',
-      parkingDuration: { hours: 3, minutes: 30 },
-      scanning: false,
-    });
-  };
-
-  // Confirm Exit
-  const handleConfirmExit = () => {
-    if (!exitGate.scannedData) {
-      toast.error('❌ [Cổng RA] Vui lòng quét biển số xe');
-      return;
-    }
-    if (!exitGate.scannedData.driverImage) {
-      toast.error('❌ [Cổng RA] Vui lòng chụp ảnh người lái');
-      return;
-    }
-
-    toast.success(`✅ Cho xe ${exitGate.scannedData.plateNumber} RA bãi`, {
-      duration: 3000,
-    });
-
-    // Reset exit gate
-    setExitGate({
-      scannedData: null,
-      selectedSpot: '',
-      selectedOwner: '',
-      paymentMethod: 'cash',
-      parkingDuration: { hours: 3, minutes: 30 },
-      scanning: false,
-    });
-  };
-
-  const calculateAmount = () => {
-    const pricePerHour = 20000;
-    return (
-      exitGate.parkingDuration.hours * pricePerHour +
-      Math.floor((exitGate.parkingDuration.minutes / 60) * pricePerHour)
+      exitPaymentContext?.source === 'reservation'
+        ? 'Đã xác nhận thanh toán đặt chỗ trước'
+        : `Đã xác nhận thanh toán ${Number(exitPaymentContext?.tongtien ?? 0).toLocaleString('vi-VN')}đ`
     );
   };
 
-  // Entry Gate UI
+  const handleReleaseExitVehicle = async () => {
+    if (!scannedData) {
+      toast.error('Vui lòng quét biển số xe');
+      return;
+    }
+
+    if (!plateFile) {
+      toast.error('Vui lòng chọn ảnh biển số');
+      return;
+    }
+
+    if (!driverFile) {
+      toast.error('Vui lòng chọn ảnh người lái');
+      return;
+    }
+
+    if (!exitExactRow) {
+      toast.error('Chưa xác định được xe trong bãi');
+      return;
+    }
+
+    if (!paymentConfirmed) {
+      toast.error('Hãy xác nhận thanh toán trước');
+      return;
+    }
+
+    if (exitPaymentContext?.source === 'timed' && !exitFeeRow?.ketthuc) {
+      toast.error('Hãy bấm Kết thúc tính giờ trước');
+      return;
+    }
+
+    const storedPaymentMethod =
+      exitPaymentContext?.source === 'reservation'
+        ? 'đặt chỗ trước'
+        : paymentMethod === 'online'
+        ? 'chuyển khoản'
+        : 'tiền mặt';
+
+    const finalAmount = Number(exitPaymentContext?.tongtien ?? 0);
+
+    setExitSaving(true);
+    try {
+      const [plateUpload, driverUpload] = await Promise.all([
+        uploadVehicleImage(plateFile, 'biensora', currentUserId),
+        uploadVehicleImage(driverFile, 'nguoira', currentUserId),
+      ]);
+
+      const { data: exitInserted, error: exitError } = await supabase
+        .from('lichsuxera')
+        .insert({
+          maxevao: exitExactRow.maxevao,
+          bienso: normalizePlate(scannedData.plateNumber),
+          thoigianra: new Date().toISOString(),
+          anhbiensora: plateUpload.publicUrl,
+          anhnguoira: driverUpload.publicUrl,
+          hinhthucthanhtoan: storedPaymentMethod,
+        })
+        .select('maxera')
+        .single();
+
+      if (exitError) {
+        console.error('INSERT LICHSUXERA ERROR:', exitError);
+        toast.error('Không thể lưu lịch sử xe ra');
+        return;
+      }
+
+      if (storedPaymentMethod !== 'đặt chỗ trước') {
+        const { error: paymentError } = await supabase.from('thanhtoan').insert({
+          maxera: exitInserted.maxera,
+          tongtien: finalAmount,
+        });
+
+        if (paymentError) {
+          console.error('INSERT THANHTOAN ERROR:', paymentError);
+          toast.error('Lưu thanh toán thất bại');
+          return;
+        }
+      }
+
+      if (exitReservationRow) {
+        const { error: bookingDoneError } = await supabase
+          .from('bangdatchotruoc')
+          .update({ trangthai: 'hoàn thành' })
+          .eq('mabang', exitReservationRow.mabang);
+
+        if (bookingDoneError) {
+          console.error('UPDATE BANGDATCHOTRUOC ERROR:', bookingDoneError);
+          toast.error('Đã lưu xe ra nhưng không cập nhật được trạng thái đặt chỗ');
+          return;
+        }
+      }
+
+      const { error: updateEntryError } = await supabase
+        .from('lichsuxevao')
+        .update({ ketthuc: true })
+        .eq('maxevao', exitExactRow.maxevao);
+
+      if (updateEntryError) {
+        console.error('UPDATE LICHSUXEVAO ERROR:', updateEntryError);
+        toast.error('Đã lưu xe ra nhưng không đóng được lượt vào');
+        return;
+      }
+
+      const { error: resetSpotError } = await supabase
+        .from('vitrido')
+        .update({ trangthai: 0 })
+        .eq('mavitri', exitExactRow.mavitri);
+
+      if (resetSpotError) {
+        console.error('UPDATE VITRIDO ERROR:', resetSpotError);
+        toast.error('Đã lưu xe ra nhưng không trả vị trí về trống');
+        return;
+      }
+
+      toast.success(
+        exitPaymentContext?.source === 'reservation'
+          ? `Đã cho xe ${exitExactRow.bienso} ra bãi theo đặt chỗ trước`
+          : `Đã cho xe ${exitExactRow.bienso} ra bãi`
+      );
+
+      setScannedData(null);
+      setPlateFile(null);
+      setDriverFile(null);
+      setExitExactRow(null);
+      setExitFeeRow(null);
+      setExitCandidates([]);
+      setExitReservationRow(null);
+      setExitPaymentContext(null);
+      setPaymentConfirmed(false);
+      setPaymentMethod('cash');
+      await reloadData();
+    } catch (error) {
+      console.error('CONFIRM EXIT ERROR:', error);
+      toast.error('Lỗi khi cho xe ra bãi');
+    } finally {
+      setExitSaving(false);
+    }
+  };
+
+  const handleFinishParkingTime = async () => {
+    if (!exitExactRow) {
+      toast.error('Chưa xác định được xe');
+      return;
+    }
+
+    if (exitPaymentContext?.source === 'reservation') {
+      toast.info('Xe đặt chỗ trước không cần kết thúc tính giờ');
+      return;
+    }
+
+    const { error } = await supabase
+      .from('thanhtiendatcho')
+      .update({ ketthuc: true })
+      .eq('maxevao', exitExactRow.maxevao)
+      .eq('ketthuc', false);
+
+    if (error) {
+      console.error('UPDATE THANHTIENDATCHO ERROR:', error);
+      toast.error('Không kết thúc được tính giờ');
+      return;
+    }
+
+    await loadExitPaymentContext(exitExactRow);
+  };
+
+  const exitSpot = exitExactRow ? parkingSpots.find((x) => x.mavitri === exitExactRow.mavitri) : null;
+  const exitSpotStatus = getSpotStatus(exitSpot?.trangthai);
+  const feeAmount = exitFeeRow ? Number(exitFeeRow.tien_hien_tai_hien_thi || 0) : Number(exitSpot?.thanhtien || 0);
+  const feeLabel = exitFeeRow?.loaigia ? getPriceTypeLabel(String(exitFeeRow.loaigia)) : String(exitSpot?.loaigia || '');
+
   const renderEntryGate = () => (
-    <div className="space-y-4">
-      {/* Camera View */}
-      <div className="bg-white rounded-xl shadow-md p-4 border-2 border-green-300">
-        <h3 className="font-bold text-gray-900 mb-3 flex items-center gap-2">
-          <Camera className="w-5 h-5 text-green-600" />
-          Camera VÀO
+    <div className="space-y-6">
+      <div className="bg-white rounded-2xl shadow-lg p-6 border-2 border-green-200">
+        <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+          <Camera className="w-6 h-6 text-green-600" />
+          Camera cổng vào - Nhận diện biển số
         </h3>
-        <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-lg aspect-video flex items-center justify-center relative overflow-hidden border-4 border-green-500">
-          {entryGate.scannedData?.plateImage ? (
-            <img
-              src={entryGate.scannedData.plateImage}
-              alt="Entry Plate"
-              className="w-full h-full object-contain"
-            />
+        <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-xl aspect-video flex items-center justify-center relative overflow-hidden border-4 border-green-500">
+          {scannedData?.plateImage ? (
+            <img src={scannedData.plateImage} alt="Scanned Plate" className="w-full h-full object-contain" />
           ) : (
             <div className="text-center">
-              <Video className="w-12 h-12 text-gray-600 mx-auto mb-2" />
-              <p className="text-gray-400 text-xs">Camera trực tiếp</p>
+              <Video className="w-16 h-16 text-gray-600 mx-auto mb-4" />
+              <p className="text-gray-400 text-sm">Camera trực tiếp - Cổng vào</p>
             </div>
           )}
-          {entryGate.scanning && (
+          {scanning && (
             <div className="absolute inset-0 flex items-center justify-center bg-green-600/30 backdrop-blur-sm">
-              <div className="text-white font-bold animate-pulse">
-                🔍 Đang nhận diện...
-              </div>
+              <div className="text-white text-2xl animate-pulse font-bold">🔍 Đang nhận diện biển số...</div>
             </div>
           )}
         </div>
 
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          <input
-            ref={entryPlateRef}
-            type="file"
-            accept="image/*"
-            onChange={handleEntryPlateImage}
-            className="hidden"
-          />
+        <div className="mt-4 grid grid-cols-2 gap-3">
+          <input ref={plateInputRef} type="file" accept="image/*" capture="environment" onChange={handlePlateImageSelect} className="hidden" />
           <button
-            onClick={() => entryPlateRef.current?.click()}
-            disabled={entryGate.scanning}
-            className="bg-gradient-to-r from-green-600 to-emerald-600 text-white py-2 rounded-lg hover:from-green-700 hover:to-emerald-700 transition disabled:opacity-50 text-sm font-semibold"
+            type="button"
+            onClick={() => plateInputRef.current?.click()}
+            disabled={scanning}
+            className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-3 rounded-xl hover:from-blue-700 hover:to-indigo-700 transition disabled:opacity-50 flex items-center justify-center gap-2 font-semibold shadow-lg"
           >
-            <Upload className="w-4 h-4 inline mr-1" />
-            Biển số
+            <Upload className="w-5 h-5" />
+            {scanning ? 'Đang xử lý...' : 'Chọn ảnh biển số'}
           </button>
-
-          <input
-            ref={entryDriverRef}
-            type="file"
-            accept="image/*"
-            onChange={handleEntryDriverImage}
-            className="hidden"
-          />
+          <input ref={driverInputRef} type="file" accept="image/*" onChange={handleDriverImageSelect} className="hidden" />
           <button
-            onClick={() => entryDriverRef.current?.click()}
-            disabled={!entryGate.scannedData}
-            className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-2 rounded-lg hover:from-blue-700 hover:to-indigo-700 transition disabled:opacity-50 text-sm font-semibold"
+            type="button"
+            onClick={() => driverInputRef.current?.click()}
+            disabled={!scannedData}
+            className="bg-gradient-to-r from-purple-600 to-pink-600 text-white py-3 rounded-xl hover:from-purple-700 hover:to-pink-700 transition disabled:opacity-50 flex items-center justify-center gap-2 font-semibold shadow-lg"
           >
-            <Camera className="w-4 h-4 inline mr-1" />
-            Người lái
+            <Camera className="w-5 h-5" />
+            Chụp ảnh người lái
           </button>
         </div>
       </div>
 
-      {/* Duplicate Owner Selection */}
-      {entryGate.scannedData?.possibleOwners && (
-        <div className="bg-gradient-to-br from-orange-50 to-red-50 rounded-xl shadow-md p-4 border-2 border-orange-300">
-          <div className="flex items-start gap-2 mb-3">
-            <AlertCircle className="w-5 h-5 text-orange-600 flex-shrink-0" />
+      {scannedData?.possibleOwners && (
+        <div className="bg-gradient-to-br from-orange-50 to-red-50 rounded-2xl shadow-lg p-6 border-2 border-orange-300">
+          <div className="flex items-start gap-3 mb-4">
+            <AlertCircle className="w-6 h-6 text-orange-600 flex-shrink-0 mt-1" />
             <div>
-              <h4 className="font-bold text-gray-900 text-sm">
-                ⚠️ Trùng biển số!
-              </h4>
-              <p className="text-xs text-gray-600">
-                Chọn Người dùng đúng ({entryGate.scannedData.possibleOwners.length} người)
+              <h3 className="text-xl font-bold text-gray-900 mb-1">⚠️ Phát hiện trùng biển số!</h3>
+              <p className="text-sm text-gray-600">
+                Có {scannedData.possibleOwners.length} Người dùng cùng biển số này. Vui lòng chọn Người dùng đúng dựa trên thông tin người vào bãi.
               </p>
             </div>
           </div>
-
-          <div className="space-y-2">
-            {entryGate.scannedData.possibleOwners.map((owner) => (
+          <div className="space-y-3">
+            {scannedData.possibleOwners.map((owner) => (
               <button
                 key={owner.id}
-                onClick={() =>
-                  setEntryGate((prev) => ({ ...prev, selectedOwner: owner.id }))
-                }
-                className={`w-full p-3 rounded-lg border-2 transition text-left text-sm ${
-                  entryGate.selectedOwner === owner.id
-                    ? 'border-green-500 bg-green-50'
-                    : 'border-gray-300 hover:border-green-300 bg-white'
+                onClick={() => setSelectedOwner(owner.id)}
+                className={`w-full p-4 rounded-xl border-2 transition text-left ${
+                  selectedOwner === owner.id ? 'border-green-500 bg-green-50' : 'border-gray-300 hover:border-green-300 bg-white'
                 }`}
               >
                 <div className="flex items-center justify-between">
                   <div>
-                    <div className="font-bold text-gray-900 flex items-center gap-1 text-sm">
+                    <div className="font-bold text-gray-900 flex items-center gap-2">
                       {owner.name}
-                      {entryGate.selectedOwner === owner.id && (
-                        <BadgeCheck className="w-4 h-4 text-green-600" />
-                      )}
+                      {selectedOwner === owner.id && <BadgeCheck className="w-5 h-5 text-green-600" />}
                     </div>
-                    <div className="text-xs text-gray-600">SĐT: {owner.phone}</div>
-                    <div className="text-xs text-gray-500">
-                      Dùng gần nhất: {owner.lastUsed.toLocaleDateString('vi-VN')}
-                    </div>
+                    <div className="text-sm text-gray-600">SĐT: {owner.phone}</div>
+                    <div className="text-xs text-gray-500 mt-1">Sử dụng gần nhất: {owner.lastUsed.toLocaleDateString('vi-VN')}</div>
                   </div>
                 </div>
               </button>
@@ -374,111 +1107,235 @@ export const DualGateMonitoring = () => {
         </div>
       )}
 
-      {/* Scanned Info */}
-      {entryGate.scannedData && (
+      {scannedData && (
         <>
-          <div className="bg-white rounded-xl shadow-md p-4">
-            <h4 className="font-bold text-gray-900 mb-3 text-sm">Thông tin xe</h4>
-            <input
-              type="text"
-              value={entryGate.scannedData.plateNumber}
-              onChange={(e) =>
-                setEntryGate((prev) => ({
-                  ...prev,
-                  scannedData: prev.scannedData
-                    ? { ...prev.scannedData, plateNumber: e.target.value }
-                    : null,
-                }))
-              }
-              className="w-full px-3 py-2 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none font-bold text-center mb-3"
-            />
-
-            <div className="grid grid-cols-2 gap-2 mb-3">
-              <div className="relative">
-                {entryGate.scannedData.plateImage ? (
-                  <img
-                    src={entryGate.scannedData.plateImage}
-                    alt="Plate"
-                    className="w-full h-24 object-cover rounded-lg border-2 border-gray-300"
-                  />
-                ) : (
-                  <div className="w-full h-24 bg-gray-200 rounded-lg flex items-center justify-center">
-                    <Camera className="w-6 h-6 text-gray-400" />
-                  </div>
-                )}
-                <div className="absolute bottom-1 left-1 bg-black/70 text-white text-xs px-2 py-0.5 rounded-full">
-                  📷 Biển
-                </div>
+          <div className="bg-white rounded-2xl shadow-lg p-6">
+            <h3 className="text-xl font-bold text-gray-900 mb-4">Thông tin xe</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-600 mb-2">Biển số đã nhận diện (có thể chỉnh sửa)</label>
+                <input
+                  type="text"
+                  value={scannedData.plateNumber}
+                  onChange={(e) => setScannedData({ ...scannedData, plateNumber: e.target.value })}
+                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 outline-none text-xl font-bold text-center"
+                  placeholder="Chỉnh sửa nếu sai"
+                />
               </div>
-              <div className="relative">
-                {entryGate.scannedData.driverImage ? (
-                  <img
-                    src={entryGate.scannedData.driverImage}
-                    alt="Driver"
-                    className="w-full h-24 object-cover rounded-lg border-2 border-gray-300"
-                  />
-                ) : (
-                  <div className="w-full h-24 bg-gray-200 rounded-lg flex items-center justify-center">
-                    <Users className="w-6 h-6 text-gray-400" />
-                  </div>
-                )}
-                <div className="absolute bottom-1 left-1 bg-black/70 text-white text-xs px-2 py-0.5 rounded-full">
-                  👤 Lái
+              <div className="grid grid-cols-2 gap-4">
+                <div className="relative">
+                  {scannedData.plateImage ? (
+                    <img src={scannedData.plateImage} alt="Plate" className="w-full h-40 object-cover rounded-xl border-2 border-gray-300" />
+                  ) : (
+                    <div className="w-full h-40 bg-gray-200 rounded-xl flex items-center justify-center">
+                      <Camera className="w-8 h-8 text-gray-400" />
+                    </div>
+                  )}
+                  <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1 rounded-full font-semibold">📷 Biển số xe</div>
+                </div>
+                <div className="relative">
+                  {scannedData.driverImage ? (
+                    <img src={scannedData.driverImage} alt="Driver" className="w-full h-40 object-cover rounded-xl border-2 border-gray-300" />
+                  ) : (
+                    <div className="w-full h-40 bg-gray-200 rounded-xl flex items-center justify-center">
+                      <Users className="w-8 h-8 text-gray-400" />
+                    </div>
+                  )}
+                  <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1 rounded-full font-semibold">👤 Người lái xe</div>
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Parking Spot Selection */}
-          <div className="bg-white rounded-xl shadow-md p-4">
-            <h4 className="font-bold text-gray-900 mb-3 text-sm flex items-center gap-2">
-              <MapPin className="w-4 h-4 text-blue-600" />
-              Chọn vị trí đỗ
-            </h4>
-            <div className="grid grid-cols-3 gap-2">
-              {availableSpots.map((spot) => (
-                <button
-                  key={spot.id}
-                  onClick={() =>
-                    setEntryGate((prev) => ({ ...prev, selectedSpot: spot.id }))
-                  }
-                  className={`p-2 rounded-lg border-2 transition text-sm ${
-                    entryGate.selectedSpot === spot.id
-                      ? 'border-green-500 bg-green-50'
-                      : 'border-gray-300 hover:border-green-300 bg-white'
-                  }`}
+          <div className="bg-white rounded-2xl shadow-lg p-6">
+            <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+              <MapPin className="w-6 h-6 text-blue-600" />
+              Chọn khu vực và vị trí đỗ
+            </h3>
+            <div className="mb-5 grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-600 mb-2">Lọc theo khu vực</label>
+                <select
+                  value={selectedZone}
+                  onChange={(e) => {
+                    setSelectedZone(e.target.value);
+                    setSelectedSpot('');
+                    setSelectedSpotStatus(null);
+                    setReservationCode('');
+                  }}
+                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-xl bg-white outline-none focus:ring-2 focus:ring-blue-500"
                 >
-                  <div className="font-bold text-gray-900">{spot.id}</div>
-                  <div className="text-xs text-gray-500">{spot.zone}</div>
-                </button>
-              ))}
+                  <option value="all">Tất cả khu vực</option>
+                  {zoneOptions.map((zone) => (
+                    <option key={zone.makhuvuc} value={zone.makhuvuc}>
+                      {zone.tenkhuvuc}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="rounded-xl bg-blue-50 border border-blue-200 p-4 text-sm text-blue-800">
+                <div className="font-semibold mb-1">Chú thích</div>
+                <div>
+                  Trạng thái vị trí: <b>0</b> = trống, <b>1</b> = đã đỗ, <b>2</b> = đặt trước.
+                </div>
+                <div>Chỉ khi bấm vào vị trí trạng thái <b>2</b> mới hiện ô nhập mã.</div>
+              </div>
             </div>
+
+            <div className="mb-5 rounded-xl bg-white border border-gray-200 p-4">
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+                <div>
+                  <div className="text-sm font-semibold text-gray-700 mb-3">Lọc theo loại vị trí</div>
+                  <div className="flex flex-wrap gap-3">
+                    {vehicleKindOptions.length === 0 ? (
+                      <span className="text-sm text-gray-500">Chưa có dữ liệu loại xe</span>
+                    ) : (
+                      vehicleKindOptions.map((kind) => (
+                        <label key={kind} className="inline-flex items-center gap-2 px-3 py-2 rounded-full border border-gray-300 bg-gray-50 cursor-pointer">
+                          <input type="checkbox" checked={selectedVehicleKinds.includes(kind)} onChange={() => toggleVehicleKind(kind)} />
+                          <span className="text-sm font-medium text-gray-700">{kind}</span>
+                        </label>
+                      ))
+                    )}
+                    {selectedVehicleKinds.length > 0 && (
+                      <button type="button" onClick={() => setSelectedVehicleKinds([])} className="text-sm font-semibold text-blue-600 hover:underline">
+                        Bỏ lọc
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {priceTypeOptions.length > 1 && (
+                  <div>
+                    <div className="text-sm font-semibold text-gray-700 mb-3">Lọc theo loại giá</div>
+                    <div className="flex flex-wrap gap-3">
+                      {priceTypeOptions.map((type) => (
+                        <label key={type} className="inline-flex items-center gap-2 px-3 py-2 rounded-full border border-gray-300 bg-gray-50 cursor-pointer">
+                          <input type="checkbox" checked={selectedPriceTypes.includes(type)} onChange={() => togglePriceType(type)} />
+                          <span className="text-sm font-medium text-gray-700">{getPriceTypeLabel(type)}</span>
+                        </label>
+                      ))}
+                      {selectedPriceTypes.length > 0 && (
+                        <button type="button" onClick={() => setSelectedPriceTypes([])} className="text-sm font-semibold text-blue-600 hover:underline">
+                          Bỏ lọc
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-5 flex justify-end">
+                <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" checked={onlyReservedSpots} onChange={(e) => setOnlyReservedSpots(e.target.checked)} />
+                  <span>Chỉ hiện vị trí trạng thái 2</span>
+                </label>
+              </div>
+            </div>
+
+            {selectedSpotStatus === 2 && (
+              <div className="mb-5">
+                <label className="block text-sm font-medium text-gray-600 mb-2">Mã thanh toán</label>
+                <input
+                  type="text"
+                  value={reservationCode}
+                  onChange={(e) =>
+                    setReservationCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8))
+                  }
+                  placeholder="VD: AB12CD34"
+                  className="w-full px-4 py-3 border-2 border-yellow-500 rounded-xl outline-none focus:ring-2 focus:ring-yellow-500"
+                />
+              </div>
+            )}
+
+            {filteredSpots.length === 0 ? (
+              <div className="text-sm text-gray-500 text-center py-8">Không có vị trí nào trong khu vực này</div>
+            ) : (
+              <div className="space-y-6">
+                {(['car', 'motorcycle', 'other'] as VehicleKind[]).map((kindItem) => {
+                  const items = filteredSpots.filter((spot) => {
+                    if (kindItem === 'car') return spot.kieuxe === 'car';
+                    if (kindItem === 'motorcycle') return spot.kieuxe === 'motorcycle';
+                    return !spot.kieuxe || (spot.kieuxe !== 'car' && spot.kieuxe !== 'motorcycle');
+                  });
+
+                  if (items.length === 0) return null;
+
+                  return (
+                    <div key={kindItem} className="rounded-2xl border border-gray-200 p-4">
+                      <div className="flex items-center justify-between mb-4">
+                        <h4 className="text-lg font-bold text-gray-900">{getVehicleKindLabel(kindItem)}</h4>
+                        <span className="text-xs text-gray-500">{items.length} vị trí</span>
+                      </div>
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                        {items.map((spot) => (
+                          <button
+                            key={spot.mavitri}
+                            onClick={() => {
+                              const status = getSpotStatus(spot.trangthai);
+                              if (status === 1) {
+                                toast.error('Vị trí này đã có xe');
+                                return;
+                              }
+                              setSelectedSpot(spot.mavitri);
+                              setSelectedSpotStatus(status);
+                              if (status !== 2) setReservationCode('');
+                            }}
+                            className={`p-4 rounded-xl border-2 transition text-left shadow-sm ${getSpotStyle(spot.trangthai)} ${
+                              selectedSpot === spot.mavitri ? 'ring-2 ring-offset-2 ring-blue-500' : ''
+                            }`}
+                          >
+                            <div className="text-lg font-bold text-gray-900">{spot.tenvitri}</div>
+                            <div className="text-xs text-gray-500 mt-1">{spot.tenkhuvuc}</div>
+                            <div className="mt-2 text-xs font-semibold">
+                              {getSpotStatus(spot.trangthai) === 0 && <span className="text-green-700"> Trống</span>}
+                              {getSpotStatus(spot.trangthai) === 1 && <span className="text-red-700"> Đã đỗ</span>}
+                              {getSpotStatus(spot.trangthai) === 2 && <span className="text-yellow-700"> Đặt trước</span>}
+                            </div>
+                            <div className="text-xs text-gray-600 mt-2">
+                              Kiểu xe: <span className="font-semibold">{getVehicleKindLabel(spot.kieuxe)}</span>
+                            </div>
+                            <div className="text-xs text-gray-600 mt-1">
+                              Loại vị trí: <span className="font-semibold">{spot.loaixe}</span>
+                            </div>
+                            {selectedSpot === spot.mavitri && (
+                              <div className="mt-2">
+                                <Check className="w-5 h-5 text-green-600 mx-auto" />
+                              </div>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
-          {/* Actions */}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 gap-4">
             <button
-              onClick={() =>
-                setEntryGate({
-                  scannedData: null,
-                  selectedSpot: '',
-                  selectedOwner: '',
-                  paymentMethod: 'cash',
-                  parkingDuration: { hours: 3, minutes: 30 },
-                  scanning: false,
-                })
-              }
-              className="bg-gradient-to-r from-red-600 to-pink-600 text-white py-4 rounded-xl hover:from-red-700 hover:to-pink-700 transition font-bold shadow-lg"
+              onClick={() => {
+                setScannedData(null);
+                setSelectedSpot('');
+                setSelectedSpotStatus(null);
+                setSelectedOwner('');
+                setPlateFile(null);
+                setDriverFile(null);
+                setReservationCode('');
+              }}
+              className="bg-gradient-to-r from-red-600 to-pink-600 text-white py-5 rounded-xl hover:from-red-700 hover:to-pink-700 transition flex items-center justify-center gap-2 font-bold text-lg shadow-lg"
             >
-              <X className="w-5 h-5 inline mr-1" />
-              TỪ CHỐI
+              <X className="w-6 h-6" />
+              Từ chối
             </button>
             <button
-              onClick={handleConfirmEntry}
-              className="bg-gradient-to-r from-green-600 to-emerald-600 text-white py-4 rounded-xl hover:from-green-700 hover:to-emerald-700 transition font-bold shadow-lg"
+              onClick={() => void handleConfirmEntry()}
+              disabled={savingEntry}
+              className="bg-gradient-to-r from-green-600 to-emerald-600 text-white py-5 rounded-xl hover:from-green-700 hover:to-emerald-700 transition flex items-center justify-center gap-2 font-bold text-lg shadow-lg disabled:opacity-60"
             >
-              <Check className="w-5 h-5 inline mr-1" />
-              CHO VÀO
+              <Check className="w-6 h-6" />
+              {savingEntry ? 'Đang lưu...' : 'Xác nhận vào'}
             </button>
           </div>
         </>
@@ -486,192 +1343,305 @@ export const DualGateMonitoring = () => {
     </div>
   );
 
-  // Exit Gate UI
   const renderExitGate = () => (
-    <div className="space-y-4">
-      {/* Camera View */}
-      <div className="bg-white rounded-xl shadow-md p-4 border-2 border-blue-300">
-        <h3 className="font-bold text-gray-900 mb-3 flex items-center gap-2">
-          <Camera className="w-5 h-5 text-blue-600" />
-          Camera RA
+    <div className="space-y-6">
+      <div className="bg-white rounded-2xl shadow-lg p-6 border-2 border-blue-200">
+        <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+          <Camera className="w-6 h-6 text-blue-600" />
+          Cổng ra - Nhận diện biển số
         </h3>
-        <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-lg aspect-video flex items-center justify-center relative overflow-hidden border-4 border-blue-500">
-          {exitGate.scannedData?.plateImage ? (
-            <img
-              src={exitGate.scannedData.plateImage}
-              alt="Exit Plate"
-              className="w-full h-full object-contain"
-            />
+        <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-xl aspect-video flex items-center justify-center relative overflow-hidden border-4 border-blue-500">
+          {scannedData?.plateImage ? (
+            <img src={scannedData.plateImage} alt="Scanned Plate" className="w-full h-full object-contain" />
           ) : (
             <div className="text-center">
-              <Video className="w-12 h-12 text-gray-600 mx-auto mb-2" />
-              <p className="text-gray-400 text-xs">Camera trực tiếp</p>
+              <Video className="w-16 h-16 text-gray-600 mx-auto mb-4" />
+              <p className="text-gray-400 text-sm">Camera trực tiếp - Cổng ra</p>
             </div>
           )}
-          {exitGate.scanning && (
+          {scanning && (
             <div className="absolute inset-0 flex items-center justify-center bg-blue-600/30 backdrop-blur-sm">
-              <div className="text-white font-bold animate-pulse">
-                🔍 Đang nhận diện...
-              </div>
+              <div className="text-white text-2xl animate-pulse font-bold">🔍 Đang nhận diện biển số...</div>
             </div>
           )}
         </div>
 
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          <input
-            ref={exitPlateRef}
-            type="file"
-            accept="image/*"
-            onChange={handleExitPlateImage}
-            className="hidden"
-          />
+        <div className="mt-4 grid grid-cols-2 gap-3">
+          <input ref={plateInputRef} type="file" accept="image/*" capture="environment" onChange={handlePlateImageSelect} className="hidden" />
           <button
-            onClick={() => exitPlateRef.current?.click()}
-            disabled={exitGate.scanning}
-            className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-2 rounded-lg hover:from-blue-700 hover:to-indigo-700 transition disabled:opacity-50 text-sm font-semibold"
+            type="button"
+            onClick={() => plateInputRef.current?.click()}
+            disabled={scanning}
+            className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-3 rounded-xl hover:from-blue-700 hover:to-indigo-700 transition disabled:opacity-50 flex items-center justify-center gap-2 font-semibold shadow-lg"
           >
-            <Upload className="w-4 h-4 inline mr-1" />
-            Biển số
+            <Upload className="w-5 h-5" />
+            {scanning ? 'Đang xử lý...' : 'Chọn ảnh biển số'}
           </button>
-
-          <input
-            ref={exitDriverRef}
-            type="file"
-            accept="image/*"
-            onChange={handleExitDriverImage}
-            className="hidden"
-          />
+          <input ref={driverInputRef} type="file" accept="image/*" onChange={handleDriverImageSelect} className="hidden" />
           <button
-            onClick={() => exitDriverRef.current?.click()}
-            disabled={!exitGate.scannedData}
-            className="bg-gradient-to-r from-purple-600 to-pink-600 text-white py-2 rounded-lg hover:from-purple-700 hover:to-pink-700 transition disabled:opacity-50 text-sm font-semibold"
+            type="button"
+            onClick={() => driverInputRef.current?.click()}
+            disabled={!scannedData}
+            className="bg-gradient-to-r from-purple-600 to-pink-600 text-white py-3 rounded-xl hover:from-purple-700 hover:to-pink-700 transition disabled:opacity-50 flex items-center justify-center gap-2 font-semibold shadow-lg"
           >
-            <Camera className="w-4 h-4 inline mr-1" />
-            Người lái
+            <Camera className="w-5 h-5" />
+            Chụp ảnh người lái
           </button>
         </div>
       </div>
 
-      {/* Scanned Info */}
-      {exitGate.scannedData && (
+      {exitCandidates.length > 0 && (
+        <div className="bg-white rounded-2xl shadow-lg p-6 border border-yellow-200">
+          <h3 className="text-lg font-bold text-gray-900 mb-3">Chọn biển số gần đúng</h3>
+          <div className="space-y-3">
+            {exitCandidates.map((item) => (
+              <button
+                key={item.row.maxevao}
+                onClick={async () => {
+                  setScannedData((prev) => ({
+                    plateNumber: item.row.bienso,
+                    plateImage: prev?.plateImage ?? '',
+                    driverImage: prev?.driverImage ?? '',
+                    possibleOwners: prev?.possibleOwners,
+                  }));
+                  setExitExactRow(item.row);
+                  await saveConfirmedPlate({ maxevao: item.row.maxevao, mavitri: item.row.mavitri, bienso: item.row.bienso });
+                  setExitCandidates([]);
+                  toast.success(`Biển số đúng: ${item.row.bienso}`);
+                  await loadExitPaymentContext(item.row);
+                }}
+                className="w-full rounded-xl border border-gray-200 p-4 text-left hover:bg-gray-50 transition"
+              >
+                <div className="font-semibold text-gray-900">{item.row.bienso}</div>
+                <div className="text-sm text-gray-500">Độ khớp: {Math.round(item.score * 100)}%</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {scannedData && (
         <>
-          <div className="bg-white rounded-xl shadow-md p-4">
-            <h4 className="font-bold text-gray-900 mb-3 text-sm">Thông tin xe</h4>
-            <input
-              type="text"
-              value={exitGate.scannedData.plateNumber}
-              onChange={(e) =>
-                setExitGate((prev) => ({
-                  ...prev,
-                  scannedData: prev.scannedData
-                    ? { ...prev.scannedData, plateNumber: e.target.value }
-                    : null,
-                }))
-              }
-              className="w-full px-3 py-2 border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none font-bold text-center mb-3"
-            />
-
-            <div className="grid grid-cols-2 gap-3 text-xs mb-3">
-              <div className="p-3 bg-blue-50 rounded-lg">
-                <div className="text-blue-600 font-medium mb-1">Giờ vào</div>
-                <div className="text-gray-900 font-bold">08:30 AM</div>
+          <div className="bg-white rounded-2xl shadow-lg p-6">
+            <h3 className="text-xl font-bold text-gray-900 mb-4">Thông tin xe</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-600 mb-2">Biển số</label>
+                <input
+                  type="text"
+                  value={scannedData.plateNumber}
+                  onChange={(e) => setScannedData({ ...scannedData, plateNumber: e.target.value })}
+                  onKeyDown={handleExitPlateKeyDown}
+                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-xl font-bold text-center"
+                  placeholder="Nhập đúng biển số rồi nhấn Enter"
+                />
               </div>
-              <div className="p-3 bg-purple-50 rounded-lg">
-                <div className="text-purple-600 font-medium mb-1">Đỗ</div>
-                <div className="text-gray-900 font-bold">
-                  {exitGate.parkingDuration.hours}h {exitGate.parkingDuration.minutes}p
+              <div className="grid grid-cols-2 gap-4">
+                <div className="relative">
+                  {scannedData.plateImage ? (
+                    <img src={scannedData.plateImage} alt="Plate" className="w-full h-40 object-cover rounded-xl border-2 border-gray-300" />
+                  ) : (
+                    <div className="w-full h-40 bg-gray-200 rounded-xl flex items-center justify-center">
+                      <Camera className="w-8 h-8 text-gray-400" />
+                    </div>
+                  )}
+                  <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1 rounded-full font-semibold">📷 Biển số xe</div>
                 </div>
-              </div>
-              <div className="p-3 bg-green-50 rounded-lg">
-                <div className="text-green-600 font-medium mb-1">Vị trí</div>
-                <div className="text-gray-900 font-bold">A015</div>
-              </div>
-              <div className="p-3 bg-gradient-to-br from-yellow-50 to-orange-50 rounded-lg border-2 border-orange-300">
-                <div className="text-orange-600 font-bold mb-1">💰 Tiền</div>
-                <div className="text-orange-700 font-bold">
-                  {calculateAmount().toLocaleString()}đ
+                <div className="relative">
+                  {scannedData.driverImage ? (
+                    <img src={scannedData.driverImage} alt="Driver" className="w-full h-40 object-cover rounded-xl border-2 border-gray-300" />
+                  ) : (
+                    <div className="w-full h-40 bg-gray-200 rounded-xl flex items-center justify-center">
+                      <Users className="w-8 h-8 text-gray-400" />
+                    </div>
+                  )}
+                  <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1 rounded-full font-semibold">👤 Người lái xe</div>
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Payment */}
-          <div className="bg-white rounded-xl shadow-md p-4">
-            <h4 className="font-bold text-gray-900 mb-3 text-sm flex items-center gap-2">
-              <DollarSign className="w-4 h-4 text-green-600" />
-              Thanh toán
-            </h4>
-            <div className="grid grid-cols-3 gap-2 mb-3">
-              <button
-                onClick={() =>
-                  setExitGate((prev) => ({ ...prev, paymentMethod: 'cash' }))
-                }
-                className={`p-3 rounded-lg border-2 transition ${
-                  exitGate.paymentMethod === 'cash'
-                    ? 'border-green-500 bg-green-50'
-                    : 'border-gray-300 hover:border-green-300 bg-white'
-                }`}
-              >
-                <div className="text-2xl mb-1">💵</div>
-                <div className="text-xs font-semibold">Tiền mặt</div>
-              </button>
-              <button
-                onClick={() =>
-                  setExitGate((prev) => ({ ...prev, paymentMethod: 'online' }))
-                }
-                className={`p-3 rounded-lg border-2 transition ${
-                  exitGate.paymentMethod === 'online'
-                    ? 'border-blue-500 bg-blue-50'
-                    : 'border-gray-300 hover:border-blue-300 bg-white'
-                }`}
-              >
-                <div className="text-2xl mb-1">🏦</div>
-                <div className="text-xs font-semibold">Chuyển khoản</div>
-              </button>
-              <button
-                onClick={() =>
-                  setExitGate((prev) => ({ ...prev, paymentMethod: 'coins' }))
-                }
-                className={`p-3 rounded-lg border-2 transition ${
-                  exitGate.paymentMethod === 'coins'
-                    ? 'border-yellow-500 bg-yellow-50'
-                    : 'border-gray-300 hover:border-yellow-300 bg-white'
-                }`}
-              >
-                <Coins className="w-8 h-8 text-yellow-600 mx-auto mb-1" />
-                <div className="text-xs font-semibold">Xu ảo</div>
-              </button>
+          {exitExactRow && (
+            <div className="bg-white rounded-2xl shadow-lg p-6">
+              <h3 className="text-xl font-bold text-gray-900 mb-4">Ảnh lúc xe vào bãi</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="relative">
+                  {exitExactRow.anhbiensovao ? (
+                    <img src={exitExactRow.anhbiensovao} alt="Ảnh biển số lúc vào" className="w-full h-48 object-cover rounded-xl border-2 border-gray-300" />
+                  ) : (
+                    <div className="w-full h-48 bg-gray-200 rounded-xl flex items-center justify-center">
+                      <Camera className="w-8 h-8 text-gray-400" />
+                    </div>
+                  )}
+                  <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1 rounded-full font-semibold">📷 Ảnh biển số lúc vào</div>
+                </div>
+                <div className="relative">
+                  {exitExactRow.anhnguoivao ? (
+                    <img src={exitExactRow.anhnguoivao} alt="Ảnh người lái lúc vào" className="w-full h-48 object-cover rounded-xl border-2 border-gray-300" />
+                  ) : (
+                    <div className="w-full h-48 bg-gray-200 rounded-xl flex items-center justify-center">
+                      <Users className="w-8 h-8 text-gray-400" />
+                    </div>
+                  )}
+                  <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1 rounded-full font-semibold">👤 Ảnh người lái lúc vào</div>
+                </div>
+              </div>
             </div>
-            <div className="bg-gradient-to-r from-green-500 to-emerald-500 text-white p-3 rounded-lg text-center text-sm">
-              <Check className="w-5 h-5 inline mr-1" />
-              Đã xác nhận thanh toán
+          )}
+
+          <div className="bg-white rounded-2xl shadow-lg p-6">
+            <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+              <DollarSign className="w-6 h-6 text-green-600" />
+              Thông tin thanh toán
+            </h3>
+            {exitFeeRow ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                <div className="p-4 rounded-xl bg-gray-50">
+                  <div className="text-gray-500">Biển số</div>
+                  <div className="font-semibold">{exitFeeRow.bienso}</div>
+                </div>
+                <div className="p-4 rounded-xl bg-gray-50">
+                  <div className="text-gray-500">Loại giá</div>
+                  <div className="font-semibold">
+                    {exitPaymentContext?.source === 'reservation'
+                      ? 'Đặt chỗ trước'
+                      : exitPaymentContext?.source === 'timed'
+                      ? 'Theo giờ / linh động'
+                      : 'Cố định'}
+                  </div>
+                </div>
+                <div className="p-4 rounded-xl bg-gray-50">
+                  <div className="text-gray-500">Loại vị trí</div>
+                  <div className="font-semibold">{exitFeeRow.loaixe ? exitFeeRow.loaixe : 'Không rõ'}</div>
+                </div>
+                <div className="p-4 rounded-xl bg-gray-50">
+                  <div className="text-gray-500">Phương tiện</div>
+                  <div className="font-semibold">{getVehicleKindLabel(exitFeeRow.kieuxe)}</div>
+                </div>
+                <div className="p-4 rounded-xl bg-gray-50">
+                  <div className="text-gray-500">Thời gian vào</div>
+                  <div className="font-semibold">{new Date(exitFeeRow.thoigianvao).toLocaleString('vi-VN')}</div>
+                </div>
+                <div className="p-4 rounded-xl bg-yellow-50 border border-yellow-200">
+                  <div className="text-yellow-700 font-medium">Tiền hiện tại</div>
+                  <div className="font-bold text-2xl text-yellow-800">{Number(exitFeeRow.tien_hien_tai_hien_thi ?? 0).toLocaleString('vi-VN')}đ</div>
+                </div>
+                <div className="p-4 rounded-xl bg-gray-50 md:col-span-2">
+                  <div className="text-gray-500">Trạng thái</div>
+                  <div className="font-semibold">{exitFeeRow.ketthuc ? 'Đã kết thúc' : 'Chưa kết thúc'}</div>
+                </div>
+                {exitSpot && (
+                  <div className="p-4 rounded-xl bg-gray-50 md:col-span-2">
+                    <div className="text-gray-500">Vị trí</div>
+                    <div className="font-semibold">
+                      {exitSpot.tenvitri} · {exitSpot.tenkhuvuc} · {exitSpotStatus === 2 ? 'Đã đặt' : exitSpotStatus === 1 ? 'Đã đỗ' : 'Trống'}
+                    </div>
+                    <div className="text-xs text-gray-500 mt-1">Loại giá: {feeLabel || 'Không rõ'} · Số tiền hiển thị: {feeAmount.toLocaleString('vi-VN')}đ</div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="text-sm text-gray-500">Chưa có dữ liệu từ bảng tính tiền</div>
+            )}
+          </div>
+
+          <div className="bg-white rounded-2xl shadow-lg p-6">
+            <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+              <DollarSign className="w-6 h-6 text-green-600" />
+              Hình thức thanh toán
+            </h3>
+            {exitPaymentContext?.source === 'reservation' ? (
+              <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4">
+                <div className="font-bold text-yellow-800">Đặt chỗ trước</div>
+                <div className="text-sm text-yellow-700 mt-1">
+                  Thanh toán này đã được ghi nhận qua hình thức <b>đặt chỗ trước</b>.
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setPaymentMethod('cash')}
+                  className={`p-5 rounded-xl border-2 transition ${paymentMethod === 'cash' ? 'border-green-500 bg-green-50 shadow-md' : 'border-gray-300 hover:border-green-300 bg-white'}`}
+                >
+                  <div className="text-4xl mb-2">💵</div>
+                  <div className="font-semibold">Tiền mặt</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPaymentMethod('online')}
+                  className={`p-5 rounded-xl border-2 transition ${paymentMethod === 'online' ? 'border-blue-500 bg-blue-50 shadow-md' : 'border-gray-300 hover:border-blue-300 bg-white'}`}
+                >
+                  <div className="text-4xl mb-2">🏦</div>
+                  <div className="font-semibold">Chuyển khoản</div>
+                </button>
+              </div>
+            )}
+            {exitPaymentContext?.source === 'timed' && !exitFeeRow?.ketthuc && (
+              <div className="mt-4">
+                <button
+                  type="button"
+                  onClick={() => void handleFinishParkingTime()}
+                  className="w-full bg-gradient-to-r from-amber-600 to-orange-600 text-white py-4 rounded-xl font-bold shadow-lg hover:from-amber-700 hover:to-orange-700 transition"
+                >
+                  Kết thúc tính giờ
+                </button>
+              </div>
+            )}
+            <div className="mt-4 bg-gradient-to-r from-green-500 to-emerald-500 text-white p-5 rounded-xl text-center shadow-lg">
+              <div className="flex items-center justify-center gap-2 text-xl font-bold">
+                <Check className="w-6 h-6" />
+                {paymentConfirmed ? 'Đã xác nhận thanh toán' : 'Chưa xác nhận thanh toán'}
+              </div>
+              <div className="text-sm mt-2 text-green-100">
+                {exitPaymentContext?.source === 'reservation'
+                  ? '📌 Đặt chỗ trước'
+                  : paymentMethod === 'cash'
+                  ? '💵 Tiền mặt'
+                  : '🏦 Chuyển khoản'}
+              </div>
             </div>
           </div>
 
-          {/* Actions */}
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 gap-4">
             <button
-              onClick={() =>
-                setExitGate({
-                  scannedData: null,
-                  selectedSpot: '',
-                  selectedOwner: '',
-                  paymentMethod: 'cash',
-                  parkingDuration: { hours: 3, minutes: 30 },
-                  scanning: false,
-                })
-              }
-              className="bg-gradient-to-r from-red-600 to-pink-600 text-white py-4 rounded-xl hover:from-red-700 hover:to-pink-700 transition font-bold shadow-lg"
+              type="button"
+              onClick={() => {
+                setScannedData(null);
+                setPlateFile(null);
+                setDriverFile(null);
+                setExitExactRow(null);
+                setExitFeeRow(null);
+                setExitCandidates([]);
+                setExitReservationRow(null);
+                setExitPaymentContext(null);
+                setPaymentConfirmed(false);
+                setPaymentMethod('cash');
+              }}
+              className="bg-gradient-to-r from-red-600 to-pink-600 text-white py-5 rounded-xl hover:from-red-700 hover:to-pink-700 transition flex items-center justify-center gap-2 font-bold text-lg shadow-lg"
             >
-              <X className="w-5 h-5 inline mr-1" />
-              HỦY
+              <X className="w-6 h-6" />
+              Hủy
             </button>
             <button
-              onClick={handleConfirmExit}
-              className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-4 rounded-xl hover:from-blue-700 hover:to-indigo-700 transition font-bold shadow-lg"
+              type="button"
+              onClick={() => void handleConfirmExitPayment()}
+              disabled={exitSaving || !exitFeeRow}
+              className="bg-gradient-to-r from-amber-600 to-orange-600 text-white py-5 rounded-xl hover:from-amber-700 hover:to-orange-700 transition flex items-center justify-center gap-2 font-bold text-lg shadow-lg disabled:opacity-60"
             >
-              <Check className="w-5 h-5 inline mr-1" />
-              CHO RA
+              <Check className="w-6 h-6" />
+              {paymentConfirmed ? 'Đã xác nhận' : 'Xác nhận thanh toán'}
+            </button>
+          </div>
+          <div className="mt-4">
+            <button
+              type="button"
+              onClick={() => void handleReleaseExitVehicle()}
+              disabled={exitSaving || !paymentConfirmed}
+              className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-5 rounded-xl hover:from-blue-700 hover:to-indigo-700 transition flex items-center justify-center gap-2 font-bold text-lg shadow-lg disabled:opacity-60"
+            >
+              <Check className="w-6 h-6" />
+              {exitSaving ? 'Đang cho ra bãi...' : 'Cho ra bãi'}
             </button>
           </div>
         </>
@@ -679,45 +1649,177 @@ export const DualGateMonitoring = () => {
     </div>
   );
 
+  return isEntry ? renderEntryGate() : renderExitGate();
+};
+
+export const DualGateMonitoring = () => {
+  const navigate = useNavigate();
+  const [cameraSwapped, setCameraSwapped] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState('');
+  const [currentLotId, setCurrentLotId] = useState('');
+  const [loadingData, setLoadingData] = useState(true);
+  const [parkingSpots, setParkingSpots] = useState<ParkingSpotView[]>([]);
+
+  const loadEntryData = async () => {
+    setLoadingData(true);
+    try {
+      const { data: authData, error: authError } = await supabase.auth.getUser();
+
+      if (authError) {
+        console.error('AUTH ERROR:', authError);
+        toast.error('Không xác thực được phiên đăng nhập');
+        navigate('/login');
+        return;
+      }
+
+      const user = authData.user;
+      if (!user) {
+        toast.error('Bạn chưa đăng nhập');
+        navigate('/login');
+        return;
+      }
+
+      setCurrentUserId(user.id);
+
+      const { data: staffRow, error: staffError } = await supabase
+        .from('ctnhanvien')
+        .select('mabaido, hoten')
+        .eq('manguoidung', user.id)
+        .maybeSingle();
+
+      if (staffError) {
+        console.error('LOAD CTNHANVIEN ERROR:', staffError);
+        toast.error('Lỗi tải thông tin nhân viên');
+        return;
+      }
+
+      if (!staffRow?.mabaido) {
+        toast.error('Nhân viên này chưa được gán bãi đỗ');
+        return;
+      }
+
+      const lotId = staffRow.mabaido;
+      setCurrentLotId(lotId);
+
+      const [{ data: lotRow, error: lotError }, { data: zoneRows, error: zoneError }, { data: priceRows, error: priceError }] = await Promise.all([
+        supabase.from('baido').select('mabaido, tenbaido, mathamgia, diachi').eq('mabaido', lotId).maybeSingle(),
+        supabase.from('khuvudo').select('makhuvuc, tenkhuvuc, mabaido').eq('mabaido', lotId),
+        supabase.from('banggia').select('mabanggia, loaixe, loaigia, kieuxe, thanhtien, thanhtoanxuao, mabaido').eq('mabaido', lotId),
+      ]);
+
+      if (lotError) console.error('LOAD BAIDO ERROR:', lotError);
+      if (zoneError) console.error('LOAD KHUVUDO ERROR:', zoneError);
+      if (priceError) console.error('LOAD BANGGIA ERROR:', priceError);
+
+      void lotRow;
+
+      const zoneMap = new Map((zoneRows ?? []).map((zone) => [zone.makhuvuc, zone]));
+      const priceMap = new Map((priceRows ?? []).map((price) => [price.mabanggia, price]));
+
+      const { data: spotRows, error: spotError } = await supabase
+        .from('vitrido')
+        .select('mavitri, tenvitri, trangthai, makhuvuc, mabanggia')
+        .in('makhuvuc', (zoneRows ?? []).map((z) => z.makhuvuc))
+        .order('tenvitri', { ascending: true });
+
+      if (spotError) {
+        console.error('LOAD VITRIDO ERROR:', spotError);
+        toast.error('Lỗi tải danh sách vị trí đỗ');
+        return;
+      }
+
+      const mappedSpots: ParkingSpotView[] = (spotRows ?? []).map((spot) => {
+        const zone = zoneMap.get(spot.makhuvuc);
+        const price = spot.mabanggia ? priceMap.get(spot.mabanggia) : null;
+
+        return {
+          mavitri: spot.mavitri,
+          tenvitri: spot.tenvitri,
+          makhuvuc: spot.makhuvuc,
+          tenkhuvuc: zone?.tenkhuvuc || 'Khu vực',
+          mabanggia: spot.mabanggia || null,
+          loaixe: price?.loaixe || 'Chưa có loại xe',
+          loaigia: price?.loaigia || null,
+          kieuxe: price?.kieuxe || null,
+          thanhtien: price?.thanhtien ?? null,
+          trangthai: spot.trangthai ?? null,
+        };
+      });
+
+      setParkingSpots(mappedSpots);
+    } finally {
+      setLoadingData(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadEntryData();
+  }, []);
+
+const renderGateColumn = (side: 'left' | 'right') => {
+  // Xác định bên này là vào hay ra
+  const isEntry = cameraSwapped
+    ? side === 'right'
+    : side === 'left';
+
+  const gateKind: GateKind = isEntry ? 'entry' : 'exit';
+
+  const title =
+    gateKind === 'entry'
+      ? `🚗 CỔNG VÀO (Bên ${side === 'left' ? 'trái' : 'phải'})`
+      : `🚙 CỔNG RA (Bên ${side === 'left' ? 'trái' : 'phải'})`;
+
+  const subtitle =
+    gateKind === 'entry'
+      ? 'Xử lý xe vào bãi và chọn vị trí'
+      : 'Xử lý xe ra khỏi bãi';
+
+    return (
+      <div className="space-y-4">
+        <div
+         className={`p-4 rounded-xl shadow-md ${
+  gateKind === 'entry'
+    ? 'bg-gradient-to-r from-green-600 to-emerald-600'
+    : 'bg-gradient-to-r from-blue-600 to-indigo-600'
+} text-white`}
+        >
+          <h2 className="text-xl font-bold flex items-center gap-2">
+            <Video className="w-6 h-6" />
+            {title}
+          </h2>
+          <p className="text-xs mt-1 opacity-90">{subtitle}</p>
+        </div>
+        <GatePanel kind={gateKind} currentUserId={currentUserId} currentLotId={currentLotId} parkingSpots={parkingSpots} reloadData={loadEntryData} />
+      </div>
+    );
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-green-50 via-blue-50 to-purple-50">
-      {/* Header */}
       <div className="bg-gradient-to-r from-green-600 via-teal-600 to-blue-600 text-white shadow-xl">
         <div className="max-w-[1800px] mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <button
-                onClick={() => navigate('/supervisor')}
-                className="p-2 hover:bg-white/10 rounded-full transition"
-              >
+              <button onClick={() => navigate('/supervisor')} className="p-2 hover:bg-white/10 rounded-full transition">
                 <ArrowLeft className="w-5 h-5" />
               </button>
               <div>
                 <h1 className="text-2xl font-bold mb-0.5">🚗🚙 Giám sát 2 cổng đồng thời</h1>
-                <p className="text-green-100 text-sm">
-                  Quản lý cổng VÀO và RA cùng lúc - Tránh nhầm lẫn
-                </p>
+                <p className="text-green-100 text-sm">Quản lý cổng VÀO và RA cùng lúc - Tránh nhầm lẫn</p>
               </div>
             </div>
 
             <div className="flex items-center gap-3">
-              {/* Swap Camera Button */}
               <button
                 onClick={() => {
                   setCameraSwapped(!cameraSwapped);
-                  toast.success(
-                    cameraSwapped ? '📹 Đã đặt lại vị trí camera mặc định' : '🔄 Đã đảo chiều camera'
-                  );
+                  toast.success(cameraSwapped ? '📹 Đã đặt lại vị trí camera mặc định' : '🔄 Đã đảo chiều camera');
                 }}
                 className="bg-white/20 backdrop-blur-sm px-4 py-2 rounded-xl hover:bg-white/30 transition flex items-center gap-2"
               >
                 <ArrowLeftRight className="w-5 h-5" />
-                <span className="font-semibold text-sm">
-                  {cameraSwapped ? 'Đặt lại camera' : 'Đảo chiều camera'}
-                </span>
+                <span className="font-semibold text-sm">{cameraSwapped ? 'Đặt lại camera' : 'Đảo chiều camera'}</span>
               </button>
-
-              {/* Clock */}
               <div className="bg-white/20 backdrop-blur-sm px-4 py-2 rounded-xl">
                 <div className="flex items-center gap-2">
                   <Clock className="w-5 h-5" />
@@ -734,76 +1836,28 @@ export const DualGateMonitoring = () => {
         </div>
       </div>
 
-      {/* Dual Gate Layout */}
       <div className="max-w-[1800px] mx-auto px-4 py-6">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Left Side */}
-          <div className="space-y-4">
-            <div
-              className={`p-4 rounded-xl shadow-md ${
-                cameraSwapped
-                  ? 'bg-gradient-to-r from-blue-600 to-indigo-600'
-                  : 'bg-gradient-to-r from-green-600 to-emerald-600'
-              } text-white`}
-            >
-              <h2 className="text-xl font-bold flex items-center gap-2">
-                <Video className="w-6 h-6" />
-                {cameraSwapped ? '🚙 CỔNG RA (Bên trái)' : '🚗 CỔNG VÀO (Bên trái)'}
-              </h2>
-              <p className="text-xs mt-1 opacity-90">
-                {cameraSwapped
-                  ? 'Xử lý xe ra khỏi bãi'
-                  : 'Xử lý xe vào bãi và chọn vị trí'}
-              </p>
-            </div>
-            {cameraSwapped ? renderExitGate() : renderEntryGate()}
+        {loadingData ? (
+          <div className="bg-white rounded-2xl shadow-lg p-8 text-center text-gray-700">Đang tải dữ liệu bãi đỗ...</div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+       {renderGateColumn('left')}
+      {renderGateColumn('right')}
           </div>
+        )}
 
-          {/* Right Side */}
-          <div className="space-y-4">
-            <div
-              className={`p-4 rounded-xl shadow-md ${
-                cameraSwapped
-                  ? 'bg-gradient-to-r from-green-600 to-emerald-600'
-                  : 'bg-gradient-to-r from-blue-600 to-indigo-600'
-              } text-white`}
-            >
-              <h2 className="text-xl font-bold flex items-center gap-2">
-                <Video className="w-6 h-6" />
-                {cameraSwapped ? '🚗 CỔNG VÀO (Bên phải)' : '🚙 CỔNG RA (Bên phải)'}
-              </h2>
-              <p className="text-xs mt-1 opacity-90">
-                {cameraSwapped
-                  ? 'Xử lý xe vào bãi và chọn vị trí'
-                  : 'Xử lý xe ra khỏi bãi'}
-              </p>
-            </div>
-            {cameraSwapped ? renderEntryGate() : renderExitGate()}
-          </div>
-        </div>
-
-        {/* Info Panel */}
         <div className="mt-6 bg-gradient-to-r from-purple-100 to-pink-100 rounded-xl shadow-md p-4 border-2 border-purple-300">
           <div className="flex items-start gap-3">
             <AlertCircle className="w-6 h-6 text-purple-600 flex-shrink-0" />
             <div>
-              <h3 className="font-bold text-gray-900 mb-1">
-                💡 Hướng dẫn sử dụng chế độ 2 cổng
-              </h3>
+              <h3 className="font-bold text-gray-900 mb-1">💡 Hướng dẫn sử dụng chế độ 2 cổng</h3>
               <ul className="text-sm text-gray-700 space-y-1">
                 <li>
-                  • <strong>Màu xanh lá</strong> = Cổng VÀO (nút "CHO VÀO") -{' '}
-                  <strong>Màu xanh dương</strong> = Cổng RA (nút "CHO RA")
+                  • <strong>Màu xanh lá</strong> = Cổng VÀO (nút "Xác nhận vào") - <strong>Màu xanh dương</strong> = Cổng RA (nút "Cho ra bãi")
                 </li>
-                <li>
-                  • Nhấn <strong>"Đảo chiều camera"</strong> để hoán đổi vị trí 2 camera trái/phải
-                </li>
-                <li>
-                  • Mỗi cổng độc lập, xử lý riêng biệt để tránh nhầm lẫn IN/OUT
-                </li>
-                <li>
-                  • Hệ thống tự động phát hiện trùng biển số và yêu cầu chọn Người dùng đúng
-                </li>
+                <li>• Nhấn <strong>"Đảo chiều camera"</strong> để hoán đổi vị trí 2 camera trái/phải</li>
+                <li>• Mỗi cổng độc lập, xử lý riêng biệt để tránh nhầm lẫn IN/OUT</li>
+                <li>• Hệ thống tự động phát hiện trùng biển số và yêu cầu chọn Người dùng đúng</li>
               </ul>
             </div>
           </div>

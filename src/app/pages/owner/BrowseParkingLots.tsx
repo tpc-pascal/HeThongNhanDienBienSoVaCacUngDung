@@ -224,7 +224,7 @@ export const BrowseParkingLots = () => {
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    navigate(`/owner/parking-lot/${lot.id}`);
+                    navigate(`/shared/parking-lot/${lot.id}`);
                   }}
                   className="bg-blue-600 text-white px-3 py-2 rounded-lg flex items-center gap-1"
                 >

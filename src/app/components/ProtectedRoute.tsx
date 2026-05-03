@@ -24,17 +24,19 @@ export const ProtectedRoute = ({
     // 🔥 KICK ALL TAB
     const handleStorage = (event: StorageEvent) => {
       if (event.key === 'force_logout') {
-        console.log("🔥 Logout từ tab khác");
+        localStorage.clear(); // Xóa sạch dữ liệu cũ
         window.location.href = '/login';
       }
     };
-    window.addEventListener('storage', handleStorage);
 
     // 🔥 LISTEN SIGN OUT
-    const { data: authListener } = supabase.auth.onAuthStateChange((event) => {
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === 'SIGNED_OUT') {
-        console.log("🔥 SIGNED OUT");
+        localStorage.clear(); // Quan trọng: Xóa cache AuthContext
         window.location.href = '/login';
+      }
+      if (event === 'SIGNED_IN') {
+         init();
       }
     });
 
@@ -61,8 +63,23 @@ export const ProtectedRoute = ({
         console.error("Lỗi lấy role:", error);
       }
 
-      const role = (data as NguoiDung | null)?.chucnang || null;
-      setUserRole(role);
+const rawRole = (data as NguoiDung | null)?.chucnang || null;
+const role = rawRole ? rawRole.trim().toLowerCase() : null;
+
+// 🔥 1. CHẶN ĐI LẠC BASE URL (Ngăn support kẹt trong route /supervisor)
+const currentPath = window.location.pathname;
+if (role) {
+  const otherRoles = ['admin', 'support', 'owner', 'provider', 'supervisor'].filter(r => r !== role);
+  // Nếu URL đang bắt đầu bằng /support mà role lại là supervisor -> Đá về /supervisor
+  const isWandering = otherRoles.some(r => currentPath.startsWith(`/${r}`));
+  if (isWandering) {
+    console.log(`🚨 Kẹt URL! Trả về đúng trang của ${role}`);
+    window.location.href = `/${role}`; // Dùng window.location để ép tải lại toàn bộ state và AuthContext
+    return;
+  }
+}
+
+setUserRole(role);
       setLoading(false);
 
       // 🔥 REALTIME WATCH
@@ -82,24 +99,23 @@ export const ProtectedRoute = ({
 
             if (newData?.manguoidung === userId) {
               setUserRole((oldRole) => {
-                if (oldRole && newData.chucnang !== oldRole) {
-                  console.log("🚨 ROLE CHANGED → KICK");
+              if (oldRole && newData.chucnang !== oldRole) {
+  console.log("🚨 ROLE CHANGED → KICK");
+  
+  // Dọn rác
+  localStorage.clear();
+  localStorage.setItem('force_logout', Date.now().toString());
 
-                  // logout tất cả
-                  supabase.auth.signOut();
+  // Logout từ Supabase
+  supabase.auth.signOut().then(() => {
+    // Ép reload chứ không chỉ navigate để reset toàn bộ React tree & AuthContext
+    window.location.href = '/login'; 
+  });
 
-                  // broadcast sang tab khác
-                  localStorage.setItem('force_logout', Date.now().toString());
+  return null;
+}
 
-                  // redirect
-                  setTimeout(() => {
-                    window.location.href = '/login';
-                  }, 100);
-
-                  return null;
-                }
-
-                return newData.chucnang;
+               return newData.chucnang?.trim().toLowerCase() || null;
               });
             }
           }

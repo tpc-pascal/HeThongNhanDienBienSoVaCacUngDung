@@ -2,9 +2,9 @@ import { useEffect, useMemo, useState, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft, Camera, Check, X, DollarSign, MapPin, Upload, Users,
-  Clock, AlertCircle, Video, Coins, BadgeCheck
+  Clock, AlertCircle, Video, BadgeCheck
 } from 'lucide-react';
-import { ImageWithFallback } from '../../components/figma/ImageWithFallback.tsx';
+
 import { toast } from 'sonner';
 import { processLicensePlate } from '../../service/lprService.ts';
 import { supabase } from '../../utils/supabase.ts';
@@ -20,6 +20,41 @@ interface ScannedVehicle {
     lastUsed: Date;
   }>;
 }
+
+interface ExitActiveRow {
+  maxevao: string;
+  bienso: string;
+  thoigianvao: string;
+  mavitri: string;
+  anhbiensovao?: string | null;
+  anhnguoivao?: string | null;
+  ketthuc: boolean;
+}
+
+interface ExitFeeViewRow {
+  id: string;
+  maxevao: string;
+  bienso: string;
+  loaigia: 'hourly' | 'daily' | 'minute' | 'second' | 'fixed' | 'reservation' | string;
+  ketthuc: boolean;
+  thoigianvao: string;
+  tien_hien_tai_hien_thi: number | string;
+  loaixe?: string | null;
+  kieuxe?: string | null;
+}
+
+interface TimedFeeRow {
+  id: string;
+  maxevao: string;
+  tien_hien_tai_hien_thi: number | string | null;
+  ketthuc: boolean | null;
+  thoigianvao?: string | null;
+}
+interface PlateCandidate {
+  row: ExitActiveRow;
+  score: number;
+}
+
 interface ParkingSpotView {
   mavitri: string;
   tenvitri: string;
@@ -27,11 +62,16 @@ interface ParkingSpotView {
   tenkhuvuc: string;
   mabanggia: string | null;
   loaixe: string;
+  loaigia: 'fixed' | 'hourly' | 'daily' | 'minute' | 'second' | string | null;
   kieuxe: 'car' | 'motorcycle' | string | null;
   thanhtien: number | string | null;
-  trangthai: number | string | null; // 0 = trống, 1 = đã đỗ, 2 = đặt trước
+  trangthai: number | string | null;
 }
-
+interface ExitPaymentContext {
+  source: 'reservation' | 'fixed' | 'timed';
+  tongtien: number;
+  loaigia: string;
+}
 interface PreBookingRow {
   mabang: string;
   manguoidung: string | null;
@@ -50,6 +90,17 @@ type VehicleKind = 'car' | 'motorcycle' | 'other';
 
 const normalizeStatus = (value: unknown) =>
   String(value ?? '').trim().toLowerCase();
+
+const isValidVietnamPlate = (plate: string) => {
+  const p = normalizePlate(plate);
+
+  // Format phổ biến:
+  // 29A12345 / 29A123.45 / 51F-12345 / 59X1-123.45
+  const regex = /^[0-9]{2}[A-Z][0-9A-Z]?[0-9]{4,5}$/;
+
+  return regex.test(p);
+};
+
 
 const normalizePlate = (value: unknown) =>
   String(value ?? '')
@@ -91,7 +142,7 @@ export const GateManagement = () => {
  
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'online' | 'coins'>('cash');
   const [selectedOwner, setSelectedOwner] = useState('');
-  const [parkingDuration, setParkingDuration] = useState({ hours: 3, minutes: 30 });
+  
  const [currentUserId, setCurrentUserId] = useState('');
 const [currentLotId, setCurrentLotId] = useState('');
 const [loadingData, setLoadingData] = useState(true);
@@ -106,8 +157,306 @@ const [selectedZone, setSelectedZone] = useState('all');
 
 const [onlyReservedSpots, setOnlyReservedSpots] = useState(false);
 const [selectedVehicleKinds, setSelectedVehicleKinds] = useState<string[]>([]);
+const [selectedPriceTypes, setSelectedPriceTypes] = useState<string[]>([]);
 const [reservationCode, setReservationCode] = useState('');
 const [selectedSpotStatus, setSelectedSpotStatus] = useState<number | null>(null);
+const [exitExactRow, setExitExactRow] = useState<ExitActiveRow | null>(null);
+const [exitFeeRow, setExitFeeRow] = useState<ExitFeeViewRow | null>(null);
+const [exitCandidates, setExitCandidates] = useState<PlateCandidate[]>([]);
+const [driverConfirmed, setDriverConfirmed] = useState(false);
+const [exitLoading, setExitLoading] = useState(false);
+const [exitSaving, setExitSaving] = useState(false);
+const [exitReservationRow, setExitReservationRow] = useState<PreBookingRow | null>(null);
+const [exitPaymentContext, setExitPaymentContext] = useState<ExitPaymentContext | null>(null);
+const [paymentConfirmed, setPaymentConfirmed] = useState(false);
+
+const levenshtein = (a: string, b: string) => {
+  const m = a.length;
+  const n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
+    }
+  }
+
+  return dp[m][n];
+};
+
+const plateSimilarity = (a: string, b: string) => {
+  const x = normalizePlate(a);
+  const y = normalizePlate(b);
+  if (!x || !y) return 0;
+  const dist = levenshtein(x, y);
+  return 1 - dist / Math.max(x.length, y.length);
+};
+const saveConfirmedPlate = async (payload: {
+  maxevao: string;
+  mavitri: string;
+  bienso: string;
+}) => {
+  const { error } = await supabase.from('xacnhanbiensodung').insert({
+    maxevao: payload.maxevao,
+    mavitri: payload.mavitri,
+    bienso: normalizePlate(payload.bienso),
+    created_at: new Date().toISOString(),
+  });
+
+  if (error) {
+    console.error('INSERT XACNHANBIENSODUNG ERROR:', error);
+  }
+};
+
+const loadExitMatch = async (plateNumber: string) => {
+  const normalized = normalizePlate(plateNumber);
+  const spotIds = parkingSpots.map((x) => x.mavitri);
+
+  if (spotIds.length === 0) {
+    toast.error('Chưa có danh sách vị trí của bãi');
+    return;
+  }
+
+  setExitLoading(true);
+  setExitExactRow(null);
+  setExitFeeRow(null);
+  setExitCandidates([]);
+  setExitReservationRow(null);
+  setExitPaymentContext(null);
+  setPaymentConfirmed(false);
+
+  try {
+    const { data: activeRows, error } = await supabase
+      .from('lichsuxevao')
+      .select('maxevao, bienso, thoigianvao, mavitri, anhbiensovao, anhnguoivao, ketthuc')
+      .eq('ketthuc', false)
+      .in('mavitri', spotIds);
+
+    if (error) {
+      console.error('LOAD EXIT ACTIVE ROWS ERROR:', error);
+      toast.error('Lỗi khi tìm xe trong bãi');
+      return;
+    }
+
+    const rows = (activeRows ?? []) as ExitActiveRow[];
+
+    const exactMatches = rows.filter(
+      (r) => normalizePlate(r.bienso) === normalized
+    );
+
+    if (exactMatches.length === 1) {
+      const exact = exactMatches[0];
+      setExitExactRow(exact);
+
+      await saveConfirmedPlate({
+        maxevao: exact.maxevao,
+        mavitri: exact.mavitri,
+        bienso: exact.bienso,
+      });
+
+      toast.success(`Biển số đúng: ${exact.bienso}`);
+      await loadExitPaymentContext(exact);
+      return;
+    }
+
+    if (exactMatches.length > 1) {
+      toast.error('Phát hiện nhiều bản ghi trùng biển số. Cần kiểm tra thủ công.');
+      return;
+    }
+
+    const candidates = rows
+      .map((r) => ({
+        row: r,
+        score: plateSimilarity(normalized, r.bienso),
+      }))
+      .filter((x) => x.score >= 0.8 && x.score < 1)
+      .sort((a, b) => b.score - a.score);
+
+    if (candidates.length > 0) {
+      setExitCandidates(candidates);
+      toast.info('Chưa khớp 100%. Hãy chọn biển gần đúng bên dưới.');
+      return;
+    }
+
+    setExitCandidates([]);
+  } finally {
+    setExitLoading(false);
+  }
+};
+
+const loadExitPaymentContext = async (entry: ExitActiveRow) => {
+  setExitReservationRow(null);
+  setExitPaymentContext(null);
+  setExitFeeRow(null);
+  setPaymentConfirmed(false);
+  
+
+
+  const spot = parkingSpots.find((x) => x.mavitri === entry.mavitri);
+  if (!spot) {
+    toast.error('Không tìm thấy vị trí của xe');
+    return;
+  }
+
+  // 1) Đặt chỗ trước: ưu tiên cao nhất
+  if (currentLotId) {
+    const { data: bookingRows, error: bookingError } = await supabase
+      .from('bangdatchotruoc')
+      .select(
+        'mabang, manguoidung, mabaido, makhuvuc, mavitri, loaithanhtoan, thanhtien, ngayhethan, trangthai, maphuongtien, mathanhtoan'
+      )
+      .eq('mabaido', currentLotId)
+      .eq('mavitri', entry.mavitri)
+      .eq('trangthai', 'đã nhận chỗ');
+
+    if (bookingError) {
+      console.error('LOAD BANGDATCHOTRUOC EXIT ERROR:', bookingError);
+    } else {
+      const matches = (bookingRows ?? []) as PreBookingRow[];
+
+      for (const booking of matches) {
+        if (!booking.maphuongtien) continue;
+
+        const { data: vehicleRow, error: vehicleError } = await supabase
+          .from('phuongtien')
+          .select('id, bienso')
+          .eq('id', booking.maphuongtien)
+          .maybeSingle();
+
+        if (vehicleError) {
+          console.error('LOAD PHUONGTIEN EXIT ERROR:', vehicleError);
+          continue;
+        }
+
+        if (
+          normalizePlate(vehicleRow?.bienso) === normalizePlate(entry.bienso)
+        ) {
+          const amount = Number(booking.thanhtien ?? 0);
+
+          setExitReservationRow(booking);
+          setExitPaymentContext({
+            source: 'reservation',
+            tongtien: amount,
+            loaigia: 'reservation',
+          });
+
+          setExitFeeRow({
+            id: booking.mabang,
+            maxevao: entry.maxevao,
+            bienso: entry.bienso,
+            loaigia: 'reservation',
+            ketthuc: true,
+            thoigianvao: entry.thoigianvao,
+            tien_hien_tai_hien_thi: amount,
+            loaixe: spot.loaixe,
+            kieuxe: spot.kieuxe,
+          });
+
+          return;
+        }
+      }
+    }
+  }
+
+  // 2) Giá cố định: lấy từ banggia
+  if (spot.mabanggia) {
+    const { data: priceRow, error: priceError } = await supabase
+      .from('banggia')
+      .select('mabanggia, loaixe, loaigia, kieuxe, thanhtien, mabaido')
+      .eq('mabanggia', spot.mabanggia)
+      .maybeSingle();
+
+    if (priceError) {
+      console.error('LOAD BANGGIA ERROR:', priceError);
+      toast.error('Lỗi khi lấy bảng giá');
+      return;
+    }
+
+    if (priceRow?.loaigia === 'fixed') {
+      const amount = Number(priceRow.thanhtien ?? 0);
+
+      setExitFeeRow({
+        id: entry.maxevao,
+        maxevao: entry.maxevao,
+        bienso: entry.bienso,
+        loaigia: 'fixed',
+        ketthuc: true,
+        thoigianvao: entry.thoigianvao,
+        tien_hien_tai_hien_thi: amount,
+        loaixe: priceRow.loaixe,
+        kieuxe: priceRow.kieuxe,
+      });
+
+      setExitPaymentContext({
+        source: 'fixed',
+        tongtien: amount,
+        loaigia: 'fixed',
+      });
+
+      return;
+    }
+  }
+
+  // 3) Giá linh động: lấy từ view_thanhtiendatcho
+  const { data: timedRow, error: timedError } = await supabase
+    .from('view_thanhtiendatcho')
+    .select('id, maxevao, tien_hien_tai_hien_thi, ketthuc, thoigianvao')
+    .eq('maxevao', entry.maxevao)
+    .maybeSingle();
+
+  if (timedError) {
+    console.error('LOAD VIEW_THANHTIENDATCHO ERROR:', timedError);
+    toast.error('Không tải được thông tin tính giờ');
+    return;
+  }
+
+  if (!timedRow) {
+    toast.error('Chưa có dữ liệu tính giờ');
+    return;
+  }
+
+  const amount = Number((timedRow as TimedFeeRow).tien_hien_tai_hien_thi ?? 0);
+
+  setExitFeeRow({
+    id: entry.maxevao,
+    maxevao: entry.maxevao,
+    bienso: entry.bienso,
+    loaigia: spot.loaigia || 'hourly',
+    ketthuc: Boolean(timedRow.ketthuc),
+    thoigianvao: entry.thoigianvao,
+    tien_hien_tai_hien_thi: amount,
+    loaixe: spot.loaixe,
+    kieuxe: spot.kieuxe,
+  });
+
+  setExitPaymentContext({
+    source: 'timed',
+    tongtien: amount,
+    loaigia: String(spot.loaigia ?? 'hourly'),
+  });
+};
+
+const handleExitPlateKeyDown = async (
+  event: React.KeyboardEvent<HTMLInputElement>
+) => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+
+  if (!scannedData?.plateNumber.trim()) {
+    toast.error('Nhập biển số trước');
+    return;
+  }
+
+  await loadExitMatch(scannedData.plateNumber);
+};
 
 
 const zoneOptions = useMemo(() => {
@@ -131,6 +480,39 @@ const vehicleKindOptions = useMemo(() => {
   return Array.from(set);
 }, [parkingSpots]);
 
+const getPriceTypeLabel = (type: string) => {
+  switch (type) {
+    case 'fixed':
+      return 'Cố định';
+    case 'hourly':
+      return 'Theo giờ';
+    case 'daily':
+      return 'Theo ngày';
+    case 'minute':
+      return 'Theo phút';
+    case 'second':
+      return 'Theo giây';
+    default:
+      return type;
+  }
+};
+
+const priceTypeOptions = useMemo(() => {
+  const set = new Set<string>();
+
+  parkingSpots.forEach((spot) => {
+    if (spot.loaigia) {
+      set.add(String(spot.loaigia));
+    }
+  });
+
+  const order = ['fixed', 'hourly', 'daily', 'minute', 'second'];
+
+  return Array.from(set).sort(
+    (a, b) => order.indexOf(a) - order.indexOf(b)
+  );
+}, [parkingSpots]);
+
 const filteredSpots = useMemo(() => {
   return parkingSpots.filter((spot) => {
     const matchZone = selectedZone === 'all' || spot.makhuvuc === selectedZone;
@@ -138,21 +520,43 @@ const filteredSpots = useMemo(() => {
       selectedVehicleKinds.length === 0 ||
       selectedVehicleKinds.includes(spot.loaixe);
     const matchReserved =
-      !onlyReservedSpots || getSpotStatus(spot.trangthai) === 2;
+  !onlyReservedSpots || getSpotStatus(spot.trangthai) === 2;
 
-    return matchZone && matchVehicle && matchReserved;
+const matchPriceType =
+  selectedPriceTypes.length === 0 ||
+  selectedPriceTypes.includes(String(spot.loaigia));
+
+return (
+  matchZone &&
+  matchVehicle &&
+  matchReserved &&
+  matchPriceType
+);
   });
-}, [parkingSpots, selectedZone, selectedVehicleKinds, onlyReservedSpots]);
+}, [
+  parkingSpots,
+  selectedZone,
+  selectedVehicleKinds,
+  onlyReservedSpots,
+  selectedPriceTypes
+]);
 
 const toggleVehicleKind = (kind: string) => {
   setSelectedVehicleKinds((prev) =>
     prev.includes(kind) ? prev.filter((x) => x !== kind) : [...prev, kind]
   );
 };
+const togglePriceType = (type: string) => {
+  setSelectedPriceTypes((prev) =>
+    prev.includes(type)
+      ? prev.filter((x) => x !== type)
+      : [...prev, type]
+  );
+};
 
 const getVehicleKindLabel = (kieuxe: string | null | undefined) => {
   if (kieuxe === 'car') return 'Ô tô';
-  if (kieuxe === 'motorcycle') return 'Xe máy';
+  if (kieuxe === 'motorcycle' || kieuxe === 'motocycle') return 'Xe máy';
   return 'Khác';
 };
 const loadEntryData = async () => {
@@ -166,6 +570,8 @@ const loadEntryData = async () => {
       navigate('/login');
       return;
     }
+
+    
 
     const user = authData.user;
     if (!user) {
@@ -211,8 +617,8 @@ setCurrentLotId(lotId);
 
         supabase
   .from('banggia')
-  .select('mabanggia, loaixe, kieuxe, thanhtien, thanhtoanxuao, mabaido')
-  .eq('mabaido', lotId),
+.select('mabanggia, loaixe, loaigia, kieuxe, thanhtien, thanhtoanxuao, mabaido')
+.eq('mabaido', lotId),
       ]);
 
     if (lotError) console.error('LOAD BAIDO ERROR:', lotError);
@@ -247,16 +653,23 @@ setCurrentLotId(lotId);
   const price = spot.mabanggia ? priceMap.get(spot.mabanggia) : null;
 
   return {
-    mavitri: spot.mavitri,
-    tenvitri: spot.tenvitri,
-    makhuvuc: spot.makhuvuc,
-    tenkhuvuc: zone?.tenkhuvuc || 'Khu vực',
-    mabanggia: spot.mabanggia || null,
-    loaixe: price?.loaixe || 'Chưa có loại xe',
-    kieuxe: price?.kieuxe || null,
-    thanhtien: price?.thanhtien ?? null,
-    trangthai: spot.trangthai ?? null,
-  };
+  mavitri: spot.mavitri,
+  tenvitri: spot.tenvitri,
+  makhuvuc: spot.makhuvuc,
+  tenkhuvuc: zone?.tenkhuvuc || 'Khu vực',
+
+  mabanggia: spot.mabanggia || null,
+
+  loaixe: price?.loaixe || 'Chưa có loại xe',
+
+  loaigia: price?.loaigia || null,
+
+  kieuxe: price?.kieuxe || null,
+
+  thanhtien: price?.thanhtien ?? null,
+
+  trangthai: spot.trangthai ?? null,
+};
 });
 
     setParkingSpots(mappedSpots);
@@ -278,14 +691,21 @@ const handlePlateImageSelect = async (event: React.ChangeEvent<HTMLInputElement>
   reader.onloadend = async () => {
     const previewImage = reader.result as string;
     setScanning(true);
+
     try {
       const plateNumber = await processLicensePlate(file);
+
       setScannedData({
         plateNumber,
         plateImage: previewImage,
-        driverImage: '',
+        driverImage: scannedData?.driverImage || '',
       });
+
       toast.success('Đã nhận diện biển số thành công!');
+
+      if (mode === 'exit' || mode === 'both') {
+        await loadExitMatch(plateNumber);
+      }
     } catch (error) {
       console.error('Lỗi nhận diện biển số:', error);
       toast.error('Lỗi khi gọi API nhận diện biển số. Vui lòng thử lại.');
@@ -293,6 +713,7 @@ const handlePlateImageSelect = async (event: React.ChangeEvent<HTMLInputElement>
       setScanning(false);
     }
   };
+
   reader.readAsDataURL(file);
 };
 
@@ -301,6 +722,7 @@ const handleDriverImageSelect = (event: React.ChangeEvent<HTMLInputElement>) => 
   if (!file) return;
 
   setDriverFile(file);
+  setDriverConfirmed(false);
 
   const reader = new FileReader();
   reader.onloadend = () => {
@@ -312,6 +734,7 @@ const handleDriverImageSelect = (event: React.ChangeEvent<HTMLInputElement>) => 
       toast.success('Đã chụp ảnh người lái!');
     }
   };
+
   reader.readAsDataURL(file);
 };
 const uploadVehicleImage = async (file: File, folder: string) => {
@@ -337,10 +760,18 @@ const uploadVehicleImage = async (file: File, folder: string) => {
     publicUrl: data.publicUrl,
   };
 };
+
+
+
+
 const handleConfirmEntry = async () => {
   if (!scannedData) {
     
     toast.error('Vui lòng quét biển số xe');
+    return;
+  }
+  if (!isValidVietnamPlate(scannedData.plateNumber)) {
+    toast.error('Biển số không đúng định dạng');
     return;
   }
 
@@ -511,9 +942,34 @@ matchedBooking = booking;
         toast.error('Đã lưu xe vào nhưng không cập nhật được trạng thái đặt chỗ');
         return;
       }
+    if (matchedBooking.manguoidung && matchedBooking.mabaido) {
+          const { error: serviceError } = await supabase
+            .from('sudungdichvu')
+            .upsert(
+              {
+                manguoidung: matchedBooking.manguoidung,
+                mabaido: matchedBooking.mabaido,
+                dasudungdichvu: true,
+                created_at: new Date().toISOString(),
+              },
+              { onConflict: 'manguoidung,mabaido' }
+            );
+
+          if (serviceError) {
+            console.error('UPSERT SUDUNGDICHVU ERROR:', serviceError);
+            toast.error('Đã lưu xe vào nhưng không cập nhật được bảng sử dụng dịch vụ');
+            return;
+          }
+        }
+
+
     }
 
-    toast.success(`✅ Đã cho xe ${scannedData.plateNumber} vào bãi`);
+
+
+
+    
+  toast.success(`✅ Đã cho xe ${scannedData.plateNumber} vào bãi`);
 
     setScannedData(null);
     setSelectedSpot('');
@@ -532,27 +988,207 @@ matchedBooking = booking;
   }
 };
 
-  const handleConfirmExit = () => {
-    if (!scannedData) {
-      toast.error('Vui lòng quét biển số xe');
-      return;
-    }
-    if (!scannedData.driverImage) {
-      toast.error('Vui lòng chụp ảnh người lái');
+const handleConfirmExitPayment = async () => {
+  if (!scannedData) {
+    toast.error('Vui lòng quét biển số xe');
+    return;
+  }
+
+  if (!plateFile) {
+    toast.error('Vui lòng chọn ảnh biển số');
+    return;
+  }
+
+  if (!driverFile) {
+    toast.error('Vui lòng chọn ảnh người lái');
+    return;
+  }
+
+  if (!exitExactRow) {
+    toast.error('Chưa xác định được xe trong bãi');
+    return;
+  }
+
+  if (exitPaymentContext?.source === 'timed' && !exitFeeRow?.ketthuc) {
+    toast.error('Hãy bấm Kết thúc tính giờ trước');
+    return;
+  }
+
+  setPaymentConfirmed(true);
+  toast.success(
+    exitPaymentContext?.source === 'reservation'
+      ? 'Đã xác nhận thanh toán đặt chỗ trước'
+      : `Đã xác nhận thanh toán ${Number(exitPaymentContext?.tongtien ?? 0).toLocaleString('vi-VN')}đ`
+  );
+};
+
+const handleReleaseExitVehicle = async () => {
+  if (!scannedData) {
+    toast.error('Vui lòng quét biển số xe');
+    return;
+  }
+
+  if (!plateFile) {
+    toast.error('Vui lòng chọn ảnh biển số');
+    return;
+  }
+
+  if (!driverFile) {
+    toast.error('Vui lòng chọn ảnh người lái');
+    return;
+  }
+
+  if (!exitExactRow) {
+    toast.error('Chưa xác định được xe trong bãi');
+    return;
+  }
+
+  if (!paymentConfirmed) {
+    toast.error('Hãy xác nhận thanh toán trước');
+    return;
+  }
+
+  if (exitPaymentContext?.source === 'timed' && !exitFeeRow?.ketthuc) {
+    toast.error('Hãy bấm Kết thúc tính giờ trước');
+    return;
+  }
+
+  const storedPaymentMethod =
+    exitPaymentContext?.source === 'reservation'
+      ? 'đặt chỗ trước'
+      : paymentMethod === 'online'
+      ? 'chuyển khoản'
+      : 'tiền mặt';
+
+  const finalAmount = Number(exitPaymentContext?.tongtien ?? 0);
+
+  setExitSaving(true);
+  try {
+    const [plateUpload, driverUpload] = await Promise.all([
+      uploadVehicleImage(plateFile, 'biensora'),
+      uploadVehicleImage(driverFile, 'nguoira'),
+    ]);
+
+    const { data: exitInserted, error: exitError } = await supabase
+      .from('lichsuxera')
+      .insert({
+        maxevao: exitExactRow.maxevao,
+        bienso: normalizePlate(scannedData.plateNumber),
+        thoigianra: new Date().toISOString(),
+        anhbiensora: plateUpload.publicUrl,
+        anhnguoira: driverUpload.publicUrl,
+        hinhthucthanhtoan: storedPaymentMethod,
+      })
+      .select('maxera')
+      .single();
+
+    if (exitError) {
+      console.error('INSERT LICHSUXERA ERROR:', exitError);
+      toast.error('Không thể lưu lịch sử xe ra');
       return;
     }
 
-    toast.success(`✅ Đã cho phép xe ${scannedData.plateNumber} ra bãi`, { duration: 3000 });
-    // Reset form
+    if (storedPaymentMethod !== 'đặt chỗ trước') {
+      const { error: paymentError } = await supabase
+        .from('thanhtoan')
+        .insert({
+          maxera: exitInserted.maxera,
+          tongtien: finalAmount,
+        });
+
+      if (paymentError) {
+        console.error('INSERT THANHTOAN ERROR:', paymentError);
+        toast.error('Lưu thanh toán thất bại');
+        return;
+      }
+    }
+
+    if (exitReservationRow) {
+      const { error: bookingDoneError } = await supabase
+        .from('bangdatchotruoc')
+        .update({ trangthai: 'hoàn thành' })
+        .eq('mabang', exitReservationRow.mabang);
+
+      if (bookingDoneError) {
+        console.error('UPDATE BANGDATCHOTRUOC ERROR:', bookingDoneError);
+        toast.error('Đã lưu xe ra nhưng không cập nhật được trạng thái đặt chỗ');
+        return;
+      }
+    }
+
+    const { error: updateEntryError } = await supabase
+      .from('lichsuxevao')
+      .update({ ketthuc: true })
+      .eq('maxevao', exitExactRow.maxevao);
+
+    if (updateEntryError) {
+      console.error('UPDATE LICHSUXEVAO ERROR:', updateEntryError);
+      toast.error('Đã lưu xe ra nhưng không đóng được lượt vào');
+      return;
+    }
+
+    const { error: resetSpotError } = await supabase
+      .from('vitrido')
+      .update({ trangthai: 0 })
+      .eq('mavitri', exitExactRow.mavitri);
+
+    if (resetSpotError) {
+      console.error('UPDATE VITRIDO ERROR:', resetSpotError);
+      toast.error('Đã lưu xe ra nhưng không trả vị trí về trống');
+      return;
+    }
+
+    toast.success(
+      exitPaymentContext?.source === 'reservation'
+        ? `Đã cho xe ${exitExactRow.bienso} ra bãi theo đặt chỗ trước`
+        : `Đã cho xe ${exitExactRow.bienso} ra bãi`
+    );
+
     setScannedData(null);
+    setPlateFile(null);
+    setDriverFile(null);
+    setExitExactRow(null);
+    setExitFeeRow(null);
+    setExitCandidates([]); 
+    setExitReservationRow(null);
+    setExitPaymentContext(null);
+    setPaymentConfirmed(false);
     setPaymentMethod('cash');
-  };
 
-  const calculateAmount = () => {
-    const pricePerHour = 20000; // 20k/hour for car
-    return parkingDuration.hours * pricePerHour + Math.floor((parkingDuration.minutes / 60) * pricePerHour);
-  };
+    await loadEntryData();
+  } catch (error) {
+    console.error('CONFIRM EXIT ERROR:', error);
+    toast.error('Lỗi khi cho xe ra bãi');
+  } finally {
+    setExitSaving(false);
+  }
+};
 
+const handleFinishParkingTime = async () => {
+  if (!exitExactRow) {
+    toast.error('Chưa xác định được xe');
+    return;
+  }
+
+  if (exitPaymentContext?.source === 'reservation') {
+    toast.info('Xe đặt chỗ trước không cần kết thúc tính giờ');
+    return;
+  }
+
+  const { error } = await supabase
+    .from('thanhtiendatcho')
+    .update({ ketthuc: true })
+    .eq('maxevao', exitExactRow.maxevao)
+    .eq('ketthuc', false);
+
+  if (error) {
+    console.error('UPDATE THANHTIENDATCHO ERROR:', error);
+    toast.error('Không kết thúc được tính giờ');
+    return;
+  }
+
+  await loadExitPaymentContext(exitExactRow);
+};
   const renderEntryGate = () => (
     <div className="space-y-6">
       {/* Camera View - Upload Image */}
@@ -579,39 +1215,44 @@ matchedBooking = booking;
           )}
         </div>
 
-        <div className="mt-4 grid grid-cols-2 gap-3">
-          <input
-            ref={plateInputRef}
-            type="file"
-            accept="image/*"
-            onChange={handlePlateImageSelect}
-            className="hidden"
-          />
-          <button
-            onClick={() => plateInputRef.current?.click()}
-            disabled={scanning}
-            className="bg-gradient-to-r from-green-600 to-emerald-600 text-white py-3 rounded-xl hover:from-green-700 hover:to-emerald-700 transition disabled:opacity-50 flex items-center justify-center gap-2 font-semibold shadow-lg"
-          >
-            <Upload className="w-5 h-5" />
-            {scanning ? 'Đang xử lý...' : 'Chọn ảnh biển số'}
-          </button>
+<div className="mt-4 grid grid-cols-2 gap-3">
+  <input
+    ref={plateInputRef}
+    type="file"
+    accept="image/*"
+    capture="environment"
+    onChange={handlePlateImageSelect}
+    className="hidden"
+  />
 
-          <input
-            ref={driverInputRef}
-            type="file"
-            accept="image/*"
-            onChange={handleDriverImageSelect}
-            className="hidden"
-          />
-          <button
-            onClick={() => driverInputRef.current?.click()}
-            disabled={!scannedData}
-            className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-3 rounded-xl hover:from-blue-700 hover:to-indigo-700 transition disabled:opacity-50 flex items-center justify-center gap-2 font-semibold shadow-lg"
-          >
-            <Camera className="w-5 h-5" />
-            Chụp ảnh người lái
-          </button>
-        </div>
+  <button
+    type="button"
+    onClick={() => plateInputRef.current?.click()}
+    disabled={scanning}
+    className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-3 rounded-xl hover:from-blue-700 hover:to-indigo-700 transition disabled:opacity-50 flex items-center justify-center gap-2 font-semibold shadow-lg"
+  >
+    <Upload className="w-5 h-5" />
+    {scanning ? 'Đang xử lý...' : 'Chọn ảnh biển số'}
+  </button>
+
+  <input
+    ref={driverInputRef}
+    type="file"
+    accept="image/*"
+    onChange={handleDriverImageSelect}
+    className="hidden"
+  />
+
+  <button
+    type="button"
+    onClick={() => driverInputRef.current?.click()}
+    disabled={!scannedData}
+    className="bg-gradient-to-r from-purple-600 to-pink-600 text-white py-3 rounded-xl hover:from-purple-700 hover:to-pink-700 transition disabled:opacity-50 flex items-center justify-center gap-2 font-semibold shadow-lg"
+  >
+    <Camera className="w-5 h-5" />
+    Chụp ảnh người lái
+  </button>
+</div>
       </div>
 
       {/* Duplicate Owner Selection */}
@@ -758,44 +1399,92 @@ matchedBooking = booking;
 </div>
 
 <div className="mb-5 rounded-xl bg-white border border-gray-200 p-4">
-  <div className="text-sm font-semibold text-gray-700 mb-3">Lọc theo loại xe trong bảng giá</div>
-  <div className="flex flex-wrap gap-3">
-    {vehicleKindOptions.length === 0 ? (
-      <span className="text-sm text-gray-500">Chưa có dữ liệu loại xe</span>
-    ) : (
-      vehicleKindOptions.map((kind) => (
-        <label
-          key={kind}
-          className="inline-flex items-center gap-2 px-3 py-2 rounded-full border border-gray-300 bg-gray-50 cursor-pointer"
-        >
-          <input
-            type="checkbox"
-            checked={selectedVehicleKinds.includes(kind)}
-            onChange={() => toggleVehicleKind(kind)}
-          />
-          <span className="text-sm font-medium text-gray-700">{kind}</span>
-        </label>
-      ))
-    )}
-    {selectedVehicleKinds.length > 0 && (
-      <button
-        type="button"
-        onClick={() => setSelectedVehicleKinds([])}
-        className="text-sm font-semibold text-blue-600 hover:underline"
-      >
-        Bỏ lọc
-      </button>
+  <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+    <div>
+      <div className="text-sm font-semibold text-gray-700 mb-3">
+        Lọc theo loại vị trí
+      </div>
+
+      <div className="flex flex-wrap gap-3">
+        {vehicleKindOptions.length === 0 ? (
+          <span className="text-sm text-gray-500">Chưa có dữ liệu loại xe</span>
+        ) : (
+          vehicleKindOptions.map((kind) => (
+            <label
+              key={kind}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-full border border-gray-300 bg-gray-50 cursor-pointer"
+            >
+              <input
+                type="checkbox"
+                checked={selectedVehicleKinds.includes(kind)}
+                onChange={() => toggleVehicleKind(kind)}
+              />
+              <span className="text-sm font-medium text-gray-700">
+  {kind}
+</span>
+            </label>
+          ))
+        )}
+
+        {selectedVehicleKinds.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setSelectedVehicleKinds([])}
+            className="text-sm font-semibold text-blue-600 hover:underline"
+          >
+            Bỏ lọc
+          </button>
+        )}
+      </div>
+    </div>
+
+    {priceTypeOptions.length > 1 && (
+      <div>
+        <div className="text-sm font-semibold text-gray-700 mb-3">
+          Lọc theo loại giá
+        </div>
+
+        <div className="flex flex-wrap gap-3">
+          {priceTypeOptions.map((type) => (
+            <label
+              key={type}
+              className="inline-flex items-center gap-2 px-3 py-2 rounded-full border border-gray-300 bg-gray-50 cursor-pointer"
+            >
+              <input
+                type="checkbox"
+                checked={selectedPriceTypes.includes(type)}
+                onChange={() => togglePriceType(type)}
+              />
+              <span className="text-sm font-medium text-gray-700">
+               {getPriceTypeLabel(type)}
+              </span>
+            </label>
+          ))}
+
+          {selectedPriceTypes.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setSelectedPriceTypes([])}
+              className="text-sm font-semibold text-blue-600 hover:underline"
+            >
+              Bỏ lọc
+            </button>
+          )}
+        </div>
+      </div>
     )}
   </div>
 
-  <label className="mt-4 flex items-center gap-2 text-sm text-gray-700">
-    <input
-      type="checkbox"
-      checked={onlyReservedSpots}
-      onChange={(e) => setOnlyReservedSpots(e.target.checked)}
-    />
-    Chỉ hiện vị trí trạng thái 2
-  </label>
+  <div className="mt-5 flex justify-end">
+    <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+      <input
+        type="checkbox"
+        checked={onlyReservedSpots}
+        onChange={(e) => setOnlyReservedSpots(e.target.checked)}
+      />
+      <span>Chỉ hiện vị trí trạng thái 2</span>
+    </label>
+  </div>
 </div>
 {selectedSpotStatus === 2 && (
   <div className="mb-5">
@@ -837,8 +1526,8 @@ matchedBooking = booking;
           <div key={kind} className="rounded-2xl border border-gray-200 p-4">
             <div className="flex items-center justify-between mb-4">
               <h4 className="text-lg font-bold text-gray-900">
-                {kind === 'car' ? 'Ô tô' : kind === 'motorcycle' ? 'Xe máy' : 'Khác'}
-              </h4>
+  {getVehicleKindLabel(kind)}
+</h4>
               <span className="text-xs text-gray-500">{items.length} vị trí</span>
             </div>
 
@@ -868,37 +1557,29 @@ matchedBooking = booking;
                   <div className="text-lg font-bold text-gray-900">{spot.tenvitri}</div>
                   <div className="text-xs text-gray-500 mt-1">{spot.tenkhuvuc}</div>
 
-<div className="mt-2 text-xs font-semibold">
-  {getSpotStatus(spot.trangthai) === 0 && (
-    <span className="text-green-700">● Trống</span>
-  )}
- {getSpotStatus(spot.trangthai) === 1 && (
-  <span className="text-red-700">● Đã đỗ</span>
-)}
-{getSpotStatus(spot.trangthai) === 2 && (
-  <span className="text-yellow-700">● Đặt trước</span>
-)}
-</div>
+               <div className="mt-2 text-xs font-semibold">
+           {getSpotStatus(spot.trangthai) === 0 && (
+                 <span className="text-green-700">● Trống</span>
+                 )}
+             {getSpotStatus(spot.trangthai) === 1 && (
+               <span className="text-red-700">● Đã đỗ</span>
+                 )}
+          {getSpotStatus(spot.trangthai) === 2 && (
+              <span className="text-yellow-700">● Đặt trước</span>
+         )}
+             </div>
 
                   <div className="text-xs text-gray-600 mt-2">
                     Kiểu xe: <span className="font-semibold">
-                      {spot.kieuxe === 'car'
-                        ? 'Ô tô'
-                        : spot.kieuxe === 'motorcycle'
-                        ? 'Xe máy'
-                        : 'Khác'}
+                     {getVehicleKindLabel(spot.kieuxe)}
                     </span>
                   </div>
 
                   <div className="text-xs text-gray-600 mt-1">
-                    Loại xe: <span className="font-semibold">{spot.loaixe}</span>
+                    Loại vị trí: <span className="font-semibold">{spot.loaixe}</span>
                   </div>
 
-                  {spot.thanhtien !== null && (
-                    <div className="text-xs text-gray-600 mt-1">
-                      Giá: <span className="font-semibold">{String(spot.thanhtien)}</span>
-                    </div>
-                  )}
+                  
 
                   {selectedSpot === spot.mavitri && (
                     <div className="mt-2">
@@ -946,23 +1627,45 @@ matchedBooking = booking;
     </div>
   );
 
-  const renderExitGate = () => (
+const renderExitGate = () => {
+  const exitSpot = exitExactRow
+    ? parkingSpots.find((x) => x.mavitri === exitExactRow.mavitri)
+    : null;
+
+  const exitSpotStatus = getSpotStatus(exitSpot?.trangthai);
+  const forcedCoins = exitSpotStatus === 2;
+
+  const feeAmount = exitFeeRow
+    ? Number(exitFeeRow.tien_hien_tai_hien_thi || 0)
+    : Number(exitSpot?.thanhtien || 0);
+
+  const feeLabel =
+    exitFeeRow?.loaigia
+      ? getPriceTypeLabel(String(exitFeeRow.loaigia))
+      : String(exitSpot?.loaigia || '');
+
+  return (
     <div className="space-y-6">
-      {/* Camera View - Upload Image */}
       <div className="bg-white rounded-2xl shadow-lg p-6 border-2 border-blue-200">
         <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
           <Camera className="w-6 h-6 text-blue-600" />
-          Camera cổng ra - Nhận diện biển số
+          Cổng ra - Nhận diện biển số
         </h3>
+
         <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-xl aspect-video flex items-center justify-center relative overflow-hidden border-4 border-blue-500">
           {scannedData?.plateImage ? (
-            <img src={scannedData.plateImage} alt="Scanned Plate" className="w-full h-full object-contain" />
+            <img
+              src={scannedData.plateImage}
+              alt="Scanned Plate"
+              className="w-full h-full object-contain"
+            />
           ) : (
             <div className="text-center">
               <Video className="w-16 h-16 text-gray-600 mx-auto mb-4" />
               <p className="text-gray-400 text-sm">Camera trực tiếp - Cổng ra</p>
             </div>
           )}
+
           {scanning && (
             <div className="absolute inset-0 flex items-center justify-center bg-blue-600/30 backdrop-blur-sm">
               <div className="text-white text-2xl animate-pulse font-bold">
@@ -972,219 +1675,382 @@ matchedBooking = booking;
           )}
         </div>
 
-        <div className="mt-4 grid grid-cols-2 gap-3">
-          <input
-            ref={plateInputRef}
-            type="file"
-            accept="image/*"
-            onChange={handlePlateImageSelect}
-            className="hidden"
-          />
-          <button
-            onClick={() => plateInputRef.current?.click()}
-            disabled={scanning}
-            className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-3 rounded-xl hover:from-blue-700 hover:to-indigo-700 transition disabled:opacity-50 flex items-center justify-center gap-2 font-semibold shadow-lg"
-          >
-            <Upload className="w-5 h-5" />
-            {scanning ? 'Đang xử lý...' : 'Chọn ảnh biển số'}
-          </button>
+   <div className="mt-4 grid grid-cols-2 gap-3">
+  <input
+    ref={plateInputRef}
+    type="file"
+    accept="image/*"
+    capture="environment"
+    onChange={handlePlateImageSelect}
+    className="hidden"
+  />
 
-          <input
-            ref={driverInputRef}
-            type="file"
-            accept="image/*"
-            onChange={handleDriverImageSelect}
-            className="hidden"
-          />
-          <button
-            onClick={() => driverInputRef.current?.click()}
-            disabled={!scannedData}
-            className="bg-gradient-to-r from-purple-600 to-pink-600 text-white py-3 rounded-xl hover:from-purple-700 hover:to-pink-700 transition disabled:opacity-50 flex items-center justify-center gap-2 font-semibold shadow-lg"
-          >
-            <Camera className="w-5 h-5" />
-            Chụp ảnh người lái
-          </button>
-        </div>
+  <button
+    type="button"
+    onClick={() => plateInputRef.current?.click()}
+    disabled={scanning}
+    className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-3 rounded-xl hover:from-blue-700 hover:to-indigo-700 transition disabled:opacity-50 flex items-center justify-center gap-2 font-semibold shadow-lg"
+  >
+    <Upload className="w-5 h-5" />
+    {scanning ? 'Đang xử lý...' : 'Chọn ảnh biển số'}
+  </button>
+
+  <input
+    ref={driverInputRef}
+    type="file"
+    accept="image/*"
+    onChange={handleDriverImageSelect}
+    className="hidden"
+  />
+
+  <button
+    type="button"
+    onClick={() => driverInputRef.current?.click()}
+    disabled={!scannedData}
+    className="bg-gradient-to-r from-purple-600 to-pink-600 text-white py-3 rounded-xl hover:from-purple-700 hover:to-pink-700 transition disabled:opacity-50 flex items-center justify-center gap-2 font-semibold shadow-lg"
+  >
+    <Camera className="w-5 h-5" />
+    Chụp ảnh người lái
+  </button>
+</div>
       </div>
 
-      {/* Scanned Info */}
+      {exitCandidates.length > 0 && (
+        <div className="bg-white rounded-2xl shadow-lg p-6 border border-yellow-200">
+          <h3 className="text-lg font-bold text-gray-900 mb-3">
+            Chọn biển số gần đúng
+          </h3>
+          <div className="space-y-3">
+            {exitCandidates.map((item) => (
+              <button
+                key={item.row.maxevao}
+                onClick={async () => {
+                  setScannedData((prev) => ({
+                    plateNumber: item.row.bienso,
+                    plateImage: prev?.plateImage ?? '',
+                    driverImage: prev?.driverImage ?? '',
+                    possibleOwners: prev?.possibleOwners,
+                  }));
+
+                  setExitExactRow(item.row);
+
+                  await saveConfirmedPlate({
+                    maxevao: item.row.maxevao,
+                    mavitri: item.row.mavitri,
+                    bienso: item.row.bienso,
+                  });
+
+                
+
+
+
+                  setExitCandidates([]);
+                  toast.success(`Biển số đúng: ${item.row.bienso}`);
+                  await loadExitPaymentContext(item.row);
+                }}
+                className="w-full rounded-xl border border-gray-200 p-4 text-left hover:bg-gray-50 transition"
+              >
+                <div className="font-semibold text-gray-900">{item.row.bienso}</div>
+                <div className="text-sm text-gray-500">
+                  Độ khớp: {Math.round(item.score * 100)}%
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {scannedData && (
         <>
           <div className="bg-white rounded-2xl shadow-lg p-6">
             <h3 className="text-xl font-bold text-gray-900 mb-4">Thông tin xe</h3>
+
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-600 mb-2">Biển số</label>
+                <label className="block text-sm font-medium text-gray-600 mb-2">
+                  Biển số
+                </label>
                 <input
-                  type="text"
-                  value={scannedData.plateNumber}
-                  onChange={(e) =>
-                    setScannedData({ ...scannedData, plateNumber: e.target.value })
-                  }
-                  className="w-full px-4 py-3 border-2 border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-xl font-bold text-center"
-                />
+  type="text"
+  value={scannedData.plateNumber}
+  onChange={(e) =>
+    setScannedData({ ...scannedData, plateNumber: e.target.value })
+  }
+  onKeyDown={handleExitPlateKeyDown}
+  className="w-full px-4 py-3 border-2 border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none text-xl font-bold text-center"
+  placeholder="Nhập đúng biển số rồi nhấn Enter"
+/>
               </div>
 
-              {/* Time and duration info */}
-              <div className="grid grid-cols-2 gap-4 text-sm">
-                <div className="p-4 bg-blue-50 rounded-xl">
-                  <div className="text-blue-600 font-medium mb-1">Giờ vào</div>
-                  <div className="text-gray-900 font-bold text-lg">08:30 AM</div>
-                </div>
-                <div className="p-4 bg-purple-50 rounded-xl">
-                  <div className="text-purple-600 font-medium mb-1">Thời gian đỗ</div>
-                  <div className="text-gray-900 font-bold text-lg">
-                    {parkingDuration.hours}h {parkingDuration.minutes}p
-                  </div>
-                </div>
-                <div className="p-4 bg-green-50 rounded-xl">
-                  <div className="text-green-600 font-medium mb-1">Vị trí</div>
-                  <div className="text-gray-900 font-bold text-lg">A015</div>
-                </div>
-                <div className="p-4 bg-gradient-to-br from-yellow-50 to-orange-50 rounded-xl border-2 border-orange-300">
-                  <div className="text-orange-600 font-bold mb-1">💰 Tổng tiền</div>
-                  <div className="text-orange-700 font-bold text-2xl">
-                    {calculateAmount().toLocaleString()}đ
-                  </div>
-                </div>
-              </div>
-
-              {/* Comparison images: Entry vs Exit */}
-              <div>
-                <h4 className="font-semibold text-gray-900 mb-3">So sánh ảnh vào - ra</h4>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <div className="relative">
-                    <ImageWithFallback
-                      src="https://images.unsplash.com/photo-1774576670116-a21417528d54?w=200"
-                      alt="Entry Plate"
-                      className="w-full h-32 object-cover rounded-xl border-2 border-green-300"
+              <div className="grid grid-cols-2 gap-4">
+                <div className="relative">
+                  {scannedData.plateImage ? (
+                    <img
+                      src={scannedData.plateImage}
+                      alt="Plate"
+                      className="w-full h-40 object-cover rounded-xl border-2 border-gray-300"
                     />
-                    <div className="absolute bottom-1 left-1 bg-green-600 text-white text-xs px-2 py-1 rounded-full font-semibold">
-                      ✓ Vào - Biển
+                  ) : (
+                    <div className="w-full h-40 bg-gray-200 rounded-xl flex items-center justify-center">
+                      <Camera className="w-8 h-8 text-gray-400" />
                     </div>
+                  )}
+                  <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1 rounded-full font-semibold">
+                    📷 Biển số xe
                   </div>
-                  <div className="relative">
-                    <ImageWithFallback
-                      src="https://images.unsplash.com/photo-1599566150163-29194dcaad36?w=200"
-                      alt="Entry Driver"
-                      className="w-full h-32 object-cover rounded-xl border-2 border-green-300"
+                </div>
+
+                <div className="relative">
+                  {scannedData.driverImage ? (
+                    <img
+                      src={scannedData.driverImage}
+                      alt="Driver"
+                      className="w-full h-40 object-cover rounded-xl border-2 border-gray-300"
                     />
-                    <div className="absolute bottom-1 left-1 bg-green-600 text-white text-xs px-2 py-1 rounded-full font-semibold">
-                      ✓ Vào - Lái
+                  ) : (
+                    <div className="w-full h-40 bg-gray-200 rounded-xl flex items-center justify-center">
+                      <Users className="w-8 h-8 text-gray-400" />
                     </div>
-                  </div>
-                  <div className="relative">
-                    {scannedData.plateImage ? (
-                      <img
-                        src={scannedData.plateImage}
-                        alt="Exit Plate"
-                        className="w-full h-32 object-cover rounded-xl border-2 border-blue-300"
-                      />
-                    ) : (
-                      <div className="w-full h-32 bg-gray-200 rounded-xl" />
-                    )}
-                    <div className="absolute bottom-1 left-1 bg-blue-600 text-white text-xs px-2 py-1 rounded-full font-semibold">
-                      → Ra - Biển
-                    </div>
-                  </div>
-                  <div className="relative">
-                    {scannedData.driverImage ? (
-                      <img
-                        src={scannedData.driverImage}
-                        alt="Exit Driver"
-                        className="w-full h-32 object-cover rounded-xl border-2 border-blue-300"
-                      />
-                    ) : (
-                      <div className="w-full h-32 bg-gray-200 rounded-xl" />
-                    )}
-                    <div className="absolute bottom-1 left-1 bg-blue-600 text-white text-xs px-2 py-1 rounded-full font-semibold">
-                      → Ra - Lái
-                    </div>
+                  )}
+                  <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1 rounded-full font-semibold">
+                    👤 Người lái xe
                   </div>
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Payment */}
-          <div className="bg-white rounded-2xl shadow-lg p-6">
-            <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <DollarSign className="w-6 h-6 text-green-600" />
-              Thanh toán
-            </h3>
-            <div className="grid grid-cols-3 gap-3 mb-4">
-              <button
-                onClick={() => setPaymentMethod('cash')}
-                className={`p-5 rounded-xl border-2 transition ${
-                  paymentMethod === 'cash'
-                    ? 'border-green-500 bg-green-50 shadow-md'
-                    : 'border-gray-300 hover:border-green-300 bg-white'
-                }`}
-              >
-                <div className="text-4xl mb-2">💵</div>
-                <div className="font-semibold">Tiền mặt</div>
-              </button>
-              <button
-                onClick={() => setPaymentMethod('online')}
-                className={`p-5 rounded-xl border-2 transition ${
-                  paymentMethod === 'online'
-                    ? 'border-blue-500 bg-blue-50 shadow-md'
-                    : 'border-gray-300 hover:border-blue-300 bg-white'
-                }`}
-              >
-                <div className="text-4xl mb-2">🏦</div>
-                <div className="font-semibold">Chuyển khoản</div>
-              </button>
-              <button
-                onClick={() => setPaymentMethod('coins')}
-                className={`p-5 rounded-xl border-2 transition ${
-                  paymentMethod === 'coins'
-                    ? 'border-yellow-500 bg-yellow-50 shadow-md'
-                    : 'border-gray-300 hover:border-yellow-300 bg-white'
-                }`}
-              >
-                <div className="text-4xl mb-2">
-                  <Coins className="w-10 h-10 text-yellow-600 mx-auto" />
-                </div>
-                <div className="font-semibold">Xu ảo</div>
-              </button>
-            </div>
-            <div className="bg-gradient-to-r from-green-500 to-emerald-500 text-white p-5 rounded-xl text-center shadow-lg">
-              <div className="flex items-center justify-center gap-2 text-xl font-bold">
-                <Check className="w-6 h-6" />
-                Đã xác nhận thanh toán
-              </div>
-              <div className="text-sm mt-2 text-green-100">
-                {paymentMethod === 'cash'
-                  ? '💵 Tiền mặt'
-                  : paymentMethod === 'online'
-                  ? '🏦 Chuyển khoản'
-                  : `🪙 ${(calculateAmount() / 1000).toLocaleString()} xu ảo`}
-              </div>
-            </div>
-          </div>
+          {exitExactRow && (
+            <div className="bg-white rounded-2xl shadow-lg p-6">
+              <h3 className="text-xl font-bold text-gray-900 mb-4">
+                Ảnh lúc xe vào bãi
+              </h3>
 
-          {/* Actions */}
-          <div className="grid grid-cols-2 gap-4">
-            <button
-              onClick={() => setScannedData(null)}
-              className="bg-gradient-to-r from-red-600 to-pink-600 text-white py-5 rounded-xl hover:from-red-700 hover:to-pink-700 transition flex items-center justify-center gap-2 font-bold text-lg shadow-lg"
-            >
-              <X className="w-6 h-6" />
-              Hủy
-            </button>
-            <button
-              onClick={handleConfirmExit}
-              className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-5 rounded-xl hover:from-blue-700 hover:to-indigo-700 transition flex items-center justify-center gap-2 font-bold text-lg shadow-lg"
-            >
-              <Check className="w-6 h-6" />
-              Cho ra bãi
-            </button>
-          </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="relative">
+                  {exitExactRow.anhbiensovao ? (
+                    <img
+                      src={exitExactRow.anhbiensovao}
+                      alt="Ảnh biển số lúc vào"
+                      className="w-full h-48 object-cover rounded-xl border-2 border-gray-300"
+                    />
+                  ) : (
+                    <div className="w-full h-48 bg-gray-200 rounded-xl flex items-center justify-center">
+                      <Camera className="w-8 h-8 text-gray-400" />
+                    </div>
+                  )}
+                  <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1 rounded-full font-semibold">
+                    📷 Ảnh biển số lúc vào
+                  </div>
+                </div>
+
+                <div className="relative">
+                  {exitExactRow.anhnguoivao ? (
+                    <img
+                      src={exitExactRow.anhnguoivao}
+                      alt="Ảnh người lái lúc vào"
+                      className="w-full h-48 object-cover rounded-xl border-2 border-gray-300"
+                    />
+                  ) : (
+                    <div className="w-full h-48 bg-gray-200 rounded-xl flex items-center justify-center">
+                      <Users className="w-8 h-8 text-gray-400" />
+                    </div>
+                  )}
+                  <div className="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-3 py-1 rounded-full font-semibold">
+                    👤 Ảnh người lái lúc vào
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+       <div className="bg-white rounded-2xl shadow-lg p-6">
+  <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+    <DollarSign className="w-6 h-6 text-green-600" />
+    Thông tin thanh toán
+  </h3>
+
+  {exitFeeRow ? (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+      <div className="p-4 rounded-xl bg-gray-50">
+        <div className="text-gray-500">Biển số</div>
+        <div className="font-semibold">{exitFeeRow.bienso}</div>
+      </div>
+
+      <div className="p-4 rounded-xl bg-gray-50">
+        <div className="text-gray-500">Loại giá</div>
+        <div className="font-semibold">
+          {exitPaymentContext?.source === 'reservation'
+            ? 'Đặt chỗ trước'
+            : exitPaymentContext?.source === 'timed'
+            ? 'Theo giờ / linh động'
+            : 'Cố định'}
+        </div>
+      </div>
+
+      <div className="p-4 rounded-xl bg-gray-50">
+        <div className="text-gray-500">Loại vị trí</div>
+        <div className="font-semibold">
+          {exitFeeRow.loaixe ? exitFeeRow.loaixe : 'Không rõ'}
+        </div>
+      </div>
+
+      <div className="p-4 rounded-xl bg-gray-50">
+        <div className="text-gray-500">Phương tiện</div>
+        <div className="font-semibold">
+          {getVehicleKindLabel(exitFeeRow.kieuxe)}
+        </div>
+      </div>
+
+      <div className="p-4 rounded-xl bg-gray-50">
+        <div className="text-gray-500">Thời gian vào</div>
+        <div className="font-semibold">
+          {new Date(exitFeeRow.thoigianvao).toLocaleString('vi-VN')}
+        </div>
+      </div>
+
+      <div className="p-4 rounded-xl bg-yellow-50 border border-yellow-200">
+        <div className="text-yellow-700 font-medium">Tiền hiện tại</div>
+        <div className="font-bold text-2xl text-yellow-800">
+          {Number(exitFeeRow.tien_hien_tai_hien_thi ?? 0).toLocaleString('vi-VN')}
+          đ
+        </div>
+      </div>
+
+      <div className="p-4 rounded-xl bg-gray-50 md:col-span-2">
+        <div className="text-gray-500">Trạng thái</div>
+        <div className="font-semibold">
+          {exitFeeRow.ketthuc ? 'Đã kết thúc' : 'Chưa kết thúc'}
+        </div>
+      </div>
+    </div>
+  ) : (
+    <div className="text-sm text-gray-500">
+      Chưa có dữ liệu từ bảng tính tiền
+    </div>
+  )}
+</div>
+
+       <div className="bg-white rounded-2xl shadow-lg p-6">
+  <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+    <DollarSign className="w-6 h-6 text-green-600" />
+    Hình thức thanh toán
+  </h3>
+
+  {exitPaymentContext?.source === 'reservation' ? (
+    <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4">
+      <div className="font-bold text-yellow-800">Đặt chỗ trước</div>
+      <div className="text-sm text-yellow-700 mt-1">
+        Thanh toán này đã được ghi nhận qua hình thức <b>đặt chỗ trước</b>.
+      </div>
+    </div>
+  ) : (
+    <div className="grid grid-cols-2 gap-3">
+      <button
+        type="button"
+        onClick={() => setPaymentMethod('cash')}
+        className={`p-5 rounded-xl border-2 transition ${
+          paymentMethod === 'cash'
+            ? 'border-green-500 bg-green-50 shadow-md'
+            : 'border-gray-300 hover:border-green-300 bg-white'
+        }`}
+      >
+        <div className="text-4xl mb-2">💵</div>
+        <div className="font-semibold">Tiền mặt</div>
+      </button>
+
+      <button
+        type="button"
+        onClick={() => setPaymentMethod('online')}
+        className={`p-5 rounded-xl border-2 transition ${
+          paymentMethod === 'online'
+            ? 'border-blue-500 bg-blue-50 shadow-md'
+            : 'border-gray-300 hover:border-blue-300 bg-white'
+        }`}
+      >
+        <div className="text-4xl mb-2">🏦</div>
+        <div className="font-semibold">Chuyển khoản</div>
+      </button>
+    </div>
+  )}
+
+  {exitPaymentContext?.source === 'timed' && !exitFeeRow?.ketthuc && (
+    <div className="mt-4">
+      <button
+        type="button"
+        onClick={() => void handleFinishParkingTime()}
+        className="w-full bg-gradient-to-r from-amber-600 to-orange-600 text-white py-4 rounded-xl font-bold shadow-lg hover:from-amber-700 hover:to-orange-700 transition"
+      >
+        Kết thúc tính giờ
+      </button>
+    </div>
+  )}
+
+  <div className="mt-4 bg-gradient-to-r from-green-500 to-emerald-500 text-white p-5 rounded-xl text-center shadow-lg">
+    <div className="flex items-center justify-center gap-2 text-xl font-bold">
+      <Check className="w-6 h-6" />
+      {paymentConfirmed ? 'Đã xác nhận thanh toán' : 'Chưa xác nhận thanh toán'}
+    </div>
+    <div className="text-sm mt-2 text-green-100">
+      {exitPaymentContext?.source === 'reservation'
+        ? '📌 Đặt chỗ trước'
+        : paymentMethod === 'cash'
+        ? '💵 Tiền mặt'
+        : '🏦 Chuyển khoản'}
+    </div>
+  </div>
+</div>
+
+         
+
+        <div className="grid grid-cols-2 gap-4">
+  <button
+    type="button"
+    onClick={() => {
+      setScannedData(null);
+      setPlateFile(null);
+      setDriverFile(null);
+      setExitExactRow(null);
+      setExitFeeRow(null);
+      setExitCandidates([]);
+      setExitReservationRow(null);
+      setExitPaymentContext(null);
+      setPaymentConfirmed(false);
+      setPaymentMethod('cash');
+    }}
+    className="bg-gradient-to-r from-red-600 to-pink-600 text-white py-5 rounded-xl hover:from-red-700 hover:to-pink-700 transition flex items-center justify-center gap-2 font-bold text-lg shadow-lg"
+  >
+    <X className="w-6 h-6" />
+    Hủy
+  </button>
+
+  <button
+    type="button"
+    onClick={() => void handleConfirmExitPayment()}
+    disabled={exitSaving || !exitFeeRow}
+    className="bg-gradient-to-r from-amber-600 to-orange-600 text-white py-5 rounded-xl hover:from-amber-700 hover:to-orange-700 transition flex items-center justify-center gap-2 font-bold text-lg shadow-lg disabled:opacity-60"
+  >
+    <Check className="w-6 h-6" />
+    {paymentConfirmed ? 'Đã xác nhận' : 'Xác nhận thanh toán'}
+  </button>
+</div>
+
+<div className="mt-4">
+  <button
+    type="button"
+    onClick={() => void handleReleaseExitVehicle()}
+    disabled={exitSaving || !paymentConfirmed}
+    className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-5 rounded-xl hover:from-blue-700 hover:to-indigo-700 transition flex items-center justify-center gap-2 font-bold text-lg shadow-lg disabled:opacity-60"
+  >
+    <Check className="w-6 h-6" />
+    {exitSaving ? 'Đang cho ra bãi...' : 'Cho ra bãi'}
+  </button>
+</div>
         </>
       )}
     </div>
   );
+};
 
   const renderBothGates = () => (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
